@@ -1,13 +1,13 @@
-﻿using Hoddmir.Core.Core.Keys;
-using Hoddmir.Core.Core.Keys.Calibration;
-using Hoddmir.Core.Core.Memory;
+﻿using Hoddmir.Core.Keys;
+using Hoddmir.Core.Keys.Calibration;
+using Hoddmir.Core.Memory;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 
-namespace Hoddmir.Core.Storage
+namespace Hoddmir.Storage
 {
     public sealed class EncryptedEntryStore : IAsyncDisposable
     {

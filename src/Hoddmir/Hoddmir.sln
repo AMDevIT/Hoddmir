@@ -1,11 +1,13 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
-VisualStudioVersion = 17.14.36414.22 d17.14
+VisualStudioVersion = 17.14.36414.22
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Hoddmir.Core", "Hoddmir.Core\Hoddmir.Core.csproj", "{0CD1BF6C-4FB4-4335-B9F9-451DFEE5F7FD}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Hoddmir.Tests", "Hoddmir.Tests\Hoddmir.Tests.csproj", "{DF6EF766-2BD4-47F8-B38F-A5FF02AD534F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Hoddmir.Core.BouncyCastle", "Hoddmir.Core.BouncyCastle\Hoddmir.Core.BouncyCastle.csproj", "{F96E059E-3674-4A52-87CF-3D58A9F2B9E8}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -21,6 +23,10 @@ Global
 		{DF6EF766-2BD4-47F8-B38F-A5FF02AD534F}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{DF6EF766-2BD4-47F8-B38F-A5FF02AD534F}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{DF6EF766-2BD4-47F8-B38F-A5FF02AD534F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F96E059E-3674-4A52-87CF-3D58A9F2B9E8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F96E059E-3674-4A52-87CF-3D58A9F2B9E8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F96E059E-3674-4A52-87CF-3D58A9F2B9E8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F96E059E-3674-4A52-87CF-3D58A9F2B9E8}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

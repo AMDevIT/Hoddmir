@@ -1,4 +1,4 @@
-﻿namespace Hoddmir.Core.Storage
+﻿namespace Hoddmir.Storage
 {
     public interface IAtomicReplace
     {

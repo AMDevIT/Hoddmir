@@ -1,4 +1,4 @@
-﻿namespace Hoddmir.Core.Core.Keys
+﻿namespace Hoddmir.Core.Keys
 {
     public enum KeyProtectionMode 
     { 

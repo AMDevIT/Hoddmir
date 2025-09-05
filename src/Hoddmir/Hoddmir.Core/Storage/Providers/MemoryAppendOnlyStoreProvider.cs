@@ -1,4 +1,4 @@
-﻿namespace Hoddmir.Core.Storage.Providers
+﻿namespace Hoddmir.Storage.Providers
 {
     public sealed class MemoryAppendOnlyStoreProvider 
         : IAppendOnlyStoreProvider, IAtomicReplace

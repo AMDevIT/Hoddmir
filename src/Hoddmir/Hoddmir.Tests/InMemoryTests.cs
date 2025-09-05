@@ -1,6 +1,6 @@
-﻿using Hoddmir.Core.Core.Keys;
-using Hoddmir.Core.Storage;
-using Hoddmir.Core.Storage.Providers;
+﻿using Hoddmir.Core.Keys;
+using Hoddmir.Storage;
+using Hoddmir.Storage.Providers;
 using System.Text;
 
 namespace Hoddmir.Tests

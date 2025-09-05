@@ -1,4 +1,4 @@
-﻿namespace Hoddmir.Core.Core.Keys
+﻿namespace Hoddmir.Core.Keys
 {
     public sealed class FixedArgon2idParamsProvider(Argon2idParams p) 
         : IArgon2idParamsProvider

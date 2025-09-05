@@ -1,7 +1,7 @@
 ﻿using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 
-namespace Hoddmir.Core.Core.Memory
+namespace Hoddmir.Core.Memory
 {
     public sealed class SensitiveBytes : SafeHandle
     {

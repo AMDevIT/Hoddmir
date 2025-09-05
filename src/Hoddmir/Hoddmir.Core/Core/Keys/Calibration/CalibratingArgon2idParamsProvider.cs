@@ -2,7 +2,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 
-namespace Hoddmir.Core.Core.Keys.Calibration
+namespace Hoddmir.Core.Keys.Calibration
 {
 
     public sealed class CalibratingArgon2idParamsProvider 

@@ -1,4 +1,4 @@
-﻿namespace Hoddmir.Core.Storage.Providers
+﻿namespace Hoddmir.Storage.Providers
 {
     public class FileAppendOnlyStoreProvider 
         : IAppendOnlyStoreProvider, IAtomicReplace, IAsyncDisposable
