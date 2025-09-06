@@ -1,0 +1,60 @@
+name: "CodeQL Advanced (dotNET 9)"
+
+on: workflow_dispatch
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - language: csharp
+          build-mode: manual
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: |           
+          9
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: ${{ matrix.language }}
+        build-mode: ${{ matrix.build-mode }}
+
+    
+    - name: Build (manual, net8.0)
+      if: matrix.build-mode == 'manual'
+      shell: bash
+      run: |
+        set -e
+        TARGET=$(git ls-files '*.sln' | head -n 1)
+        if [ -z "$TARGET" ]; then
+          TARGET=$(git ls-files '*.csproj' | head -n 1)
+        fi
+        if [ -z "$TARGET" ]; then
+          echo "No .sln o .csproj found in the repository"; exit 1
+        fi
+        echo "Building: $TARGET"        
+    
+        dotnet restore "$TARGET" -p:Configuration=Release -p:TargetFramework=net9.0    
+        dotnet build "$TARGET" -c Release -f net9.0 --no-restore
+    
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:${{matrix.language}}"
