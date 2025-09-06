@@ -2,6 +2,7 @@
 using Hoddmir.Core.Keys;
 using Hoddmir.Core.Keys.Calibration;
 using Hoddmir.Core.Memory;
+using Microsoft.Extensions.Logging;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -53,13 +54,23 @@ namespace Hoddmir.Storage
 
         #endregion
 
+        #region Properties
+
+        private ILogger? Logger
+        {
+            get;
+        }
+
+        #endregion
+
         #region .ctor
 
         private EncryptedEntryStore(IAppendOnlyStoreProvider storeProvider, 
                                     IAtomicReplace replacer, 
                                     IAEADProvider aeadProvider,
                                     byte[] dek, 
-                                    long nextSeq)
+                                    long nextSeq,
+                                    ILogger? logger = null)
         {
             this.storeProvider = storeProvider;
             this.replacer = replacer;
@@ -71,6 +82,7 @@ namespace Hoddmir.Storage
             CryptographicOperations.ZeroMemory(dek);
 
             this.nextSeq = nextSeq;
+            this.Logger = logger;
         }
 
         #endregion
@@ -94,7 +106,7 @@ namespace Hoddmir.Storage
 
             if (len == 0)
             {
-                byte[] dek = MemoryBlockHelpers.RandomBytes(32);
+                byte[] dek = MemoryBlockHelper.RandomBytes(32);
 
                 // Write headers
 
@@ -171,7 +183,7 @@ namespace Hoddmir.Storage
                 throw new ArgumentException("Empty ID");
 
             byte[] keyBytes = Encoding.UTF8.GetBytes(id);
-            byte[] nonce = MemoryBlockHelpers.RandomBytes(GCMNonceLen);
+            byte[] nonce = MemoryBlockHelper.RandomBytes(GCMNonceLen);
             long seq = Interlocked.Increment(ref nextSeq);
             byte op = 0;
 
@@ -192,16 +204,7 @@ namespace Hoddmir.Storage
                                       aad.AsSpan(),
                                       value.Span,
                                       cipherTextBuffer.AsSpan(),
-                                      tag.AsSpan());
-
-            //using (AesGcm gcm = CreateGcm(out tmpKey))
-            //gcm.Encrypt(nonce.AsSpan(), 
-            //            value.Span, 
-            //            cipherTextBuffer.AsSpan(), 
-            //            tag.AsSpan(), 
-            //            aad.AsSpan());
-
-            // CryptographicOperations.ZeroMemory(tmpKey);
+                                      tag.AsSpan());            
 
             // serialize record
             int total = 1 + 8 + 4 + 4 + GCMNonceLen + keyBytes.Length + cipherTextBuffer.Length + GCMTagLen;
@@ -246,7 +249,7 @@ namespace Hoddmir.Storage
             if (!index.TryGetValue(id, out var idx) || idx.Deleted) 
                 return null;
 
-            // leggi il record raw
+            // Read raw record
             byte[] rented = ArrayPool<byte>.Shared.Rent(idx.TotalLen);
 
             try
@@ -328,7 +331,7 @@ namespace Hoddmir.Storage
                 return;
 
             byte[] keyBytes = Encoding.UTF8.GetBytes(id);
-            byte[] nonce = MemoryBlockHelpers.RandomBytes(GCMNonceLen);
+            byte[] nonce = MemoryBlockHelper.RandomBytes(GCMNonceLen);
             long seq = Interlocked.Increment(ref nextSeq);
             byte op = 1;
             int keyLen = keyBytes.Length, ctLen = 0;
@@ -409,96 +412,97 @@ namespace Hoddmir.Storage
 
         public async Task CompactAsync(CancellationToken cancellationToken = default)
         {
-            // Rewrite header and live record in a new atomic body via backend
-
             await this.replacer.ReplaceWithAsync(async stream =>
             {
-                // 1) Header: copy it in the actual store provider
-                await CopyHeaderAsync(this.storeProvider, stream, cancellationToken)
+                // 1) Header identico
+                await CopyHeaderAsync(this.storeProvider, 
+                                      stream, 
+                                      cancellationToken)
                      .ConfigureAwait(false);
 
-                // 2) Revrite live records using new PUT op 
-                string[] live = [.. this.index.Where(kv => !kv.Value.Deleted)
-                                         .Select(kv => kv.Key)];
+                // 2) Riscrivi solo i record vivi, con nuovi seq e nuovi nonce
+                string[] liveIds = this.index.Where(kv => !kv.Value.Deleted)
+                                             .Select(kv => kv.Key)
+                                             .ToArray();
                 long newSeq = 0;
 
-                foreach (string? id in live)
+                foreach (var id in liveIds)
                 {
-                    byte[]? currentValue = await GetAsync(id, cancellationToken)
-                                                .ConfigureAwait(false);
-                    if (currentValue is null) 
-                        continue;
+                    var plaintext = await GetAsync(id, cancellationToken).ConfigureAwait(false);
+                    if (plaintext is null) continue; // se non decifrabile, salta
 
-                    byte[] keyBytes = Encoding.UTF8.GetBytes(id);
-                    byte[] nonce = MemoryBlockHelpers.RandomBytes(GCMNonceLen);
-                    long seq = Interlocked.Increment(ref newSeq);
                     byte op = 0;
+                    var keyBytes = Encoding.UTF8.GetBytes(id);
+                    var nonce = MemoryBlockHelper.RandomBytes(this.aeadProvider.NonceSizeBytes);
+                    var seq = Interlocked.Increment(ref newSeq);
+
+                    // AAD = Op(1) | Seq(8) | KeyLen(4) | CtLen(4)
+                    // Prima cifra per ottenere ctBuf/tag
+                    var ctBuf = new byte[plaintext.Length];
+                    var tag = new byte[this.aeadProvider.TagSizeBytes];
+
+                    // compila AAD con ctLen **corretto**
                     byte[] aad = new byte[17];
-
                     aad[0] = op;
+                    BinaryPrimitives.WriteInt64LittleEndian(aad.AsSpan(1, 8), seq);
+                    BinaryPrimitives.WriteInt32LittleEndian(aad.AsSpan(9, 4), keyBytes.Length);
+                    BinaryPrimitives.WriteInt32LittleEndian(aad.AsSpan(13, 4), ctBuf.Length);
 
-                    BinaryPrimitives.WriteInt64LittleEndian(aad.AsSpan()[1..], seq);
-                    BinaryPrimitives.WriteInt32LittleEndian(aad.AsSpan()[9..], keyBytes.Length);
-                    BinaryPrimitives.WriteInt32LittleEndian(aad.AsSpan()[13..], currentValue.Length);
+                    var tmpKey = this.dek.ToManagedCopy();
+                    try
+                    {
+                        this.aeadProvider.Encrypt(tmpKey.AsSpan(),
+                                                  nonce.AsSpan(),
+                                                  aad.AsSpan(),
+                                                  plaintext.AsSpan(),
+                                                  ctBuf.AsSpan(),
+                                                  tag.AsSpan());
+                    }
+                    finally
+                    {
+                        CryptographicOperations.ZeroMemory(tmpKey);
+                        CryptographicOperations.ZeroMemory(aad);
+                    }
 
-                    byte[] cipherTextBuffer = new byte[currentValue.Length];
-                    byte[] tag = new byte[GCMTagLen];
-                    // byte[] tmpKey;
+                    int total = 1 + 8 + 4 + 4 + nonce.Length + keyBytes.Length + ctBuf.Length + tag.Length;
+                    var buf = new byte[total];
+                    int off = 0;
+                    buf[off++] = op;
+                    BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(off, 8), seq); off += 8;
+                    BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(off, 4), keyBytes.Length); off += 4;
+                    BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(off, 4), ctBuf.Length); off += 4;
 
-                    this.aeadProvider.Encrypt(dek.AsSpan(),
-                                      nonce.AsSpan(),
-                                      aad.AsSpan(),
-                                      currentValue.AsSpan(),
-                                      cipherTextBuffer.AsSpan(),
-                                      tag.AsSpan());
+                    nonce.CopyTo(buf.AsSpan(off, nonce.Length)); off += nonce.Length;
+                    keyBytes.CopyTo(buf.AsSpan(off, keyBytes.Length)); off += keyBytes.Length;
+                    ctBuf.CopyTo(buf.AsSpan(off, ctBuf.Length)); off += ctBuf.Length;
+                    tag.CopyTo(buf.AsSpan(off, tag.Length)); off += tag.Length;
 
-
-                    //using (AesGcm gcm = CreateGcm(out tmpKey))
-                    //gcm.Encrypt(nonce.AsSpan(), 
-                    //            currentValue.AsSpan(), 
-                    //            cipherTextBuffer.AsSpan(), 
-                    //            tag.AsSpan(), 
-                    //            aad.AsSpan());
-
-                    // CryptographicOperations.ZeroMemory(tmpKey);
-                    CryptographicOperations.ZeroMemory(aad);
-
-                    // serialize on stream
-                    using BinaryWriter bw = new (stream, 
-                                                 Encoding.UTF8, 
-                                                 leaveOpen: true);
-                    bw.Write(op);
-                    bw.Write(seq);
-                    bw.Write(keyBytes.Length);
-                    bw.Write(cipherTextBuffer.Length);
-                    bw.Write(nonce);
-                    bw.Write(keyBytes);
-                    bw.Write(cipherTextBuffer);
-                    bw.Write(tag);
+                    await stream.WriteAsync(buf, 0, buf.Length, cancellationToken).ConfigureAwait(false);
                 }
 
-                await stream.FlushAsync(cancellationToken)
-                            .ConfigureAwait(false);
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }, cancellationToken).ConfigureAwait(false);
 
-            }, cancellationToken)
-            .ConfigureAwait(false);
-
-            // After replace: rebuild index to realign offset/seq            
-            byte[] tmpDek = this.dek.ToManagedCopy();
-
+            // 3) Ricostruisci indice dal nuovo device
+            var dekCopy = this.dek.ToManagedCopy();
             try
             {
                 this.index.Clear();
                 this.nextSeq = await RebuildIndexAsync(this.storeProvider, 
-                                                       tmpDek, 
+                                                       dekCopy, 
                                                        cancellationToken)
                                     .ConfigureAwait(false);
             }
-            finally 
-            { 
-                CryptographicOperations.ZeroMemory(tmpDek); 
+            catch(Exception exc)
+            {
+                this.Logger?.LogDebug(exc, "Error during index rebuild after compaction");
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(dekCopy);
             }
         }
+
 
         public async ValueTask DisposeAsync()
         {
@@ -674,7 +678,7 @@ namespace Hoddmir.Storage
                         TimeSpan timeTarget = TimeSpan.FromMilliseconds(500);
                         IArgon2idParamsProvider? currentArgonProvider = (argonParametersProvider ?? new CalibratingArgon2idParamsProvider(timeTarget));
                         Argon2idParams argon2IdParams = currentArgonProvider.GetParameters();
-                        byte[] salt = MemoryBlockHelpers.RandomBytes(16);
+                        byte[] salt = MemoryBlockHelper.RandomBytes(16);
                         byte[] passwordTemp = passwordUtf8.ToArray();
 
                         byte[] kek = argonKeyProvider.DeriveKekArgon2id(passwordTemp, 
@@ -684,7 +688,7 @@ namespace Hoddmir.Storage
                                                        argon2IdParams.Parallelism);
                         CryptographicOperations.ZeroMemory(passwordTemp);
 
-                        byte[] nonce = MemoryBlockHelpers.RandomBytes(GCMNonceLen);
+                        byte[] nonce = MemoryBlockHelper.RandomBytes(GCMNonceLen);
                         byte[] encDek = new byte[dek.Length];
                         byte[] tag = new byte[GCMTagLen];
 
@@ -736,7 +740,7 @@ namespace Hoddmir.Storage
                         if (passwordUtf8.IsEmpty) 
                             throw new ArgumentException("Password required for PBKDF2");
 
-                        byte[] salt = MemoryBlockHelpers.RandomBytes(16);
+                        byte[] salt = MemoryBlockHelper.RandomBytes(16);
                         int iters = DefaultIteractions;
 
                         using Rfc2898DeriveBytes kdf = new (passwordUtf8.ToArray(), 
@@ -744,7 +748,7 @@ namespace Hoddmir.Storage
                                                             iters, 
                                                             HashAlgorithmName.SHA256);
                         byte[] kek = kdf.GetBytes(32);
-                        byte[] nonce = MemoryBlockHelpers.RandomBytes(GCMNonceLen);
+                        byte[] nonce = MemoryBlockHelper.RandomBytes(GCMNonceLen);
                         byte[] encDek = new byte[dek.Length];
                         byte[] tag = new byte[GCMTagLen];
 

@@ -2,7 +2,7 @@
 
 namespace Hoddmir.Core.Memory
 {
-    internal static class MemoryBlockHelpers
+    internal static class MemoryBlockHelper
     {
         #region Methods
 
