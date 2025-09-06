@@ -1,6 +1,8 @@
-﻿using Hoddmir.Core.Keys;
+﻿using Hoddmir.Core.Encryption;
+using Hoddmir.Core.Keys;
 using Hoddmir.Storage;
 using Hoddmir.Storage.Providers;
+using System.Runtime.CompilerServices;
 using System.Text;
 
 namespace Hoddmir.Tests
@@ -11,7 +13,7 @@ namespace Hoddmir.Tests
         #region Fields
 
         private static readonly byte[] password = Encoding.UTF8.GetBytes("test-password");
-        private static readonly IArgon2idParamsProvider FastArgon =
+        private static readonly IArgon2idParamsProvider fastArgon =
             new FixedArgon2idParamsProvider(new (memoryKib: 32 * 1024,   // 32 MiB: quick for tests
                                                  iterations: 2,
                                                  parallelism: 2));
@@ -22,11 +24,22 @@ namespace Hoddmir.Tests
 
         private static async Task<EncryptedEntryStore> CreateStoreAsync(MemoryAppendOnlyStoreProvider memoryStore)
         {
+            IAEADProvider aeadProvider = new AesCtrHmacSha256Provider();
+            return await CreateStoreAsync(memoryStore, aeadProvider);
+        }
+
+        private static async Task<EncryptedEntryStore> CreateStoreAsync(MemoryAppendOnlyStoreProvider memoryStore,
+                                                                        IAEADProvider aeadProvider)
+        {
+            ArgonKeyProvider argonKeyProvider = new();
+
             return await EncryptedEntryStore.OpenAsync(storeProvider: memoryStore,
                                                        replacer: memoryStore,
+                                                       aeadProvider: aeadProvider,
                                                        mode: KeyProtectionMode.PasswordArgon2id,
                                                        passwordUtf8: password,
-                                                       argonParams: FastArgon,
+                                                       argonParamsProvider: fastArgon,
+                                                       argonKeyProvider: argonKeyProvider,
                                                        cancellationToken: CancellationToken.None);
         }
 

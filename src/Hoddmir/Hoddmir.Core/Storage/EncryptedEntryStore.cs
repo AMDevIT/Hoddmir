@@ -292,14 +292,22 @@ namespace Hoddmir.Storage
                 byte[] pt = new byte[ctLen];
                 try
                 {
-                    byte[] tmpKey;
-                    using var gcm = CreateGcm(out tmpKey);
-                    gcm.Decrypt(nonce.AsSpan(), 
-                                ctBuf.AsSpan(), 
-                                tag.AsSpan(), 
-                                pt.AsSpan(), 
-                                aad.AsSpan());
-                    CryptographicOperations.ZeroMemory(tmpKey);
+                    // byte[] tmpKey;
+
+                    aeadProvider.Decrypt(dek.AsSpan(), 
+                                         nonce.AsSpan(), 
+                                         aad.AsSpan(),
+                                         ctBuf.AsSpan(), 
+                                         tag.AsSpan(), 
+                                         pt.AsSpan());
+
+                    //using var gcm = CreateGcm(out tmpKey);
+                    //gcm.Decrypt(nonce.AsSpan(), 
+                    //            ctBuf.AsSpan(), 
+                    //            tag.AsSpan(), 
+                    //            pt.AsSpan(), 
+                    //            aad.AsSpan());
+                    // CryptographicOperations.ZeroMemory(tmpKey);
                     CryptographicOperations.ZeroMemory(aad);
                     return pt;
                 }
@@ -333,10 +341,19 @@ namespace Hoddmir.Storage
             BinaryPrimitives.WriteInt32LittleEndian(aad.AsSpan()[13..], ctLen);
 
             byte[] tag = new byte[GCMTagLen];
-            byte[] tmpKey;
-            using (AesGcm gcm = CreateGcm(out tmpKey))
-            gcm.Encrypt(nonce, ReadOnlySpan<byte>.Empty, Span<byte>.Empty, tag, aad);
-            CryptographicOperations.ZeroMemory(tmpKey);
+            // byte[] tmpKey;
+
+            // using (AesGcm gcm = CreateGcm(out tmpKey))
+            // gcm.Encrypt(nonce, ReadOnlySpan<byte>.Empty, Span<byte>.Empty, tag, aad);
+
+            aeadProvider.Encrypt(dek.AsSpan(), 
+                                 nonce.AsSpan(), 
+                                 aad.AsSpan(),
+                                 ReadOnlySpan<byte>.Empty, 
+                                 Span<byte>.Empty, 
+                                 tag.AsSpan());
+
+            // CryptographicOperations.ZeroMemory(tmpKey);
             CryptographicOperations.ZeroMemory(aad);
 
             int total = 1 + 8 + 4 + 4 + GCMNonceLen + keyLen + 0 + GCMTagLen;
@@ -424,18 +441,26 @@ namespace Hoddmir.Storage
                     BinaryPrimitives.WriteInt32LittleEndian(aad.AsSpan()[9..], keyBytes.Length);
                     BinaryPrimitives.WriteInt32LittleEndian(aad.AsSpan()[13..], currentValue.Length);
 
-                    byte[] ctBuf = new byte[currentValue.Length];
+                    byte[] cipherTextBuffer = new byte[currentValue.Length];
                     byte[] tag = new byte[GCMTagLen];
-                    byte[] tmpKey;
+                    // byte[] tmpKey;
 
-                    using (AesGcm gcm = CreateGcm(out tmpKey))
-                    gcm.Encrypt(nonce.AsSpan(), 
-                                currentValue.AsSpan(), 
-                                ctBuf.AsSpan(), 
-                                tag.AsSpan(), 
-                                aad.AsSpan());
+                    this.aeadProvider.Encrypt(dek.AsSpan(),
+                                      nonce.AsSpan(),
+                                      aad.AsSpan(),
+                                      currentValue.AsSpan(),
+                                      cipherTextBuffer.AsSpan(),
+                                      tag.AsSpan());
 
-                    CryptographicOperations.ZeroMemory(tmpKey);
+
+                    //using (AesGcm gcm = CreateGcm(out tmpKey))
+                    //gcm.Encrypt(nonce.AsSpan(), 
+                    //            currentValue.AsSpan(), 
+                    //            cipherTextBuffer.AsSpan(), 
+                    //            tag.AsSpan(), 
+                    //            aad.AsSpan());
+
+                    // CryptographicOperations.ZeroMemory(tmpKey);
                     CryptographicOperations.ZeroMemory(aad);
 
                     // serialize on stream
@@ -445,10 +470,10 @@ namespace Hoddmir.Storage
                     bw.Write(op);
                     bw.Write(seq);
                     bw.Write(keyBytes.Length);
-                    bw.Write(ctBuf.Length);
+                    bw.Write(cipherTextBuffer.Length);
                     bw.Write(nonce);
                     bw.Write(keyBytes);
-                    bw.Write(ctBuf);
+                    bw.Write(cipherTextBuffer);
                     bw.Write(tag);
                 }
 
@@ -483,11 +508,11 @@ namespace Hoddmir.Storage
 
         #region Internals
 
-        private AesGcm CreateGcm(out byte[] temporaryKey)
-        { 
-            temporaryKey = dek.ToManagedCopy();            
-            return new (temporaryKey, temporaryKey.Length); 
-        }
+        //private AesGcm CreateGcm(out byte[] temporaryKey)
+        //{ 
+        //    temporaryKey = dek.ToManagedCopy();            
+        //    return new (temporaryKey, temporaryKey.Length); 
+        //}
 
         static byte[] RandomBytes(int n) 
         {
@@ -730,9 +755,11 @@ namespace Hoddmir.Storage
                         byte[] encDek = new byte[dek.Length];
                         byte[] tag = new byte[GCMTagLen];
 
-                        using (AesGcm aesGcm = new (kek)) 
+                        // using (AesGcm aesGcm = new (kek)) 
 
-                        aesGcm.Encrypt(nonce, dek, encDek, tag, ReadOnlySpan<byte>.Empty);
+                        // aesGcm.Encrypt(nonce, dek, encDek, tag, ReadOnlySpan<byte>.Empty);
+
+                        aeadProvider.Encrypt(kek, nonce, ReadOnlySpan<byte>.Empty, dek, encDek, tag);
 
                         CryptographicOperations.ZeroMemory(kek);
 
@@ -798,9 +825,9 @@ namespace Hoddmir.Storage
             byte[] payload = new byte[headerLen];
 
             got = await storeProvider.ReadAtAsync(fixedHdr.Length, 
-                                        payload, 
-                                        cancellationToken)
-                           .ConfigureAwait(false);
+                                                  payload, 
+                                                  cancellationToken)
+                                     .ConfigureAwait(false);
 
             if (got != payload.Length) 
                 throw new InvalidDataException("Incomplete header payload");
@@ -906,14 +933,14 @@ namespace Hoddmir.Storage
                         byte[] kek = kdf.GetBytes(32);
                         byte[] dek = new byte[encDek.Length];
                         try 
-                        { 
-                            
-                            using AesGcm aesGcm = new (kek); 
-                            aesGcm.Decrypt(nonce, 
-                                           encDek, 
-                                           tag, 
-                                           dek, 
-                                           ReadOnlySpan<byte>.Empty); 
+                        {
+                            aeadProvider.Decrypt(kek, nonce, ReadOnlySpan<byte>.Empty, encDek, tag, dek);
+                            //using AesGcm aesGcm = new (kek); 
+                            //aesGcm.Decrypt(nonce, 
+                            //               encDek, 
+                            //               tag, 
+                            //               dek, 
+                            //               ReadOnlySpan<byte>.Empty); 
                         }
                         finally 
                         { 

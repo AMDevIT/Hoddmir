@@ -26,7 +26,9 @@ namespace Hoddmir.Core.Encryption
         {
             if (key.Length != 32 || nonce.Length != 12 || tag.Length != 16)
                 throw new ArgumentException("Bad key/nonce/tag size");
-            if (ciphertext.Length != plaintext.Length) throw new ArgumentException("ct size != pt size");
+
+            if (ciphertext.Length != plaintext.Length) 
+                throw new ArgumentException("ct size != pt size");
 
             // Deriva Kenc,Kmac via HKDF-SHA256
             Span<byte> kenc = stackalloc byte[32];
@@ -36,11 +38,12 @@ namespace Hoddmir.Core.Encryption
             AesCtrXor(kenc, nonce, plaintext, ciphertext); // CTR XOR
 
             // tag = Trunc16(HMAC(Kmac, aad || nonce || ct))
-            using var h = new HMACSHA256(kmac.ToArray());
-            h.TransformBlock(aad.ToArray(), 0, aad.Length, null, 0);
-            h.TransformBlock(nonce.ToArray(), 0, nonce.Length, null, 0);
-            h.TransformFinalBlock(ciphertext.ToArray(), 0, ciphertext.Length);
-            var mac = h.Hash!;
+            using var hmac = new HMACSHA256(kmac.ToArray());
+
+            hmac.TransformBlock(aad.ToArray(), 0, aad.Length, null, 0);
+            hmac.TransformBlock(nonce.ToArray(), 0, nonce.Length, null, 0);
+            hmac.TransformFinalBlock(ciphertext.ToArray(), 0, ciphertext.Length);
+            byte[] mac = hmac.Hash!;
             mac.AsSpan(0, 16).CopyTo(tag);
 
             CryptographicOperations.ZeroMemory(kenc);
@@ -65,12 +68,12 @@ namespace Hoddmir.Core.Encryption
             HkdfSha256Expand(key, "EES-CTR-HKDF", kenc, kmac);
 
             // Verifica MAC prima di decifrare
-            using var h = new HMACSHA256(kmac.ToArray());
-            h.TransformBlock(aad.ToArray(), 0, aad.Length, null, 0);
-            h.TransformBlock(nonce.ToArray(), 0, nonce.Length, null, 0);
-            h.TransformFinalBlock(ciphertext.ToArray(), 0, ciphertext.Length);
+            using HMACSHA256 hmac = new(kmac.ToArray());
+            hmac.TransformBlock(aad.ToArray(), 0, aad.Length, null, 0);
+            hmac.TransformBlock(nonce.ToArray(), 0, nonce.Length, null, 0);
+            hmac.TransformFinalBlock(ciphertext.ToArray(), 0, ciphertext.Length);
 
-            var mac = h.Hash!;
+            byte[] mac = hmac.Hash!;
             bool ok = CryptographicOperations.FixedTimeEquals(mac.AsSpan(0, 16), tag);
 
             if (!ok) 
@@ -90,25 +93,27 @@ namespace Hoddmir.Core.Encryption
         static void HkdfSha256Expand(ReadOnlySpan<byte> ikm, string info, Span<byte> kenc, Span<byte> kmac)
         {
             // PRK = HMAC(zeros, IKM)
-            using var h = new HMACSHA256(new byte[32]);
-            var prk = h.ComputeHash(ikm.ToArray()); // 32B
+            using HMACSHA256 hmac = new(new byte[32]);
+            byte[] privateKey = hmac.ComputeHash(ikm.ToArray()); // 32B
 
             byte[] T = Array.Empty<byte>();
             byte counter = 1;
 
-            using var h2 = new HMACSHA256(prk);
+            using HMACSHA256 hmacSecondPassage = new HMACSHA256(privateKey);
             // Kenc
-            h2.Initialize();
-            h2.TransformBlock(T, 0, 0, null, 0);
+            hmacSecondPassage.Initialize();
+            hmacSecondPassage.TransformBlock(T, 0, 0, null, 0);
             var infoBytes = System.Text.Encoding.ASCII.GetBytes(info);
-            h2.TransformBlock(infoBytes, 0, infoBytes.Length, null, 0);
-            h2.TransformFinalBlock(new[] { counter }, 0, 1);
-            var okm1 = h2.Hash!;
-            okm1.AsSpan(0, 32).CopyTo(kenc);
-            T = okm1; counter++;
+            hmacSecondPassage.TransformBlock(infoBytes, 0, infoBytes.Length, null, 0);
+            hmacSecondPassage.TransformFinalBlock(new[] { counter }, 0, 1);
+            var okm1 = hmacSecondPassage.Hash!;
+            okm1.AsSpan(0, 32)
+                .CopyTo(kenc);
+            T = okm1; 
+            counter++;
 
             // Kmac
-            using var h3 = new HMACSHA256(prk);
+            using var h3 = new HMACSHA256(privateKey);
             h3.TransformBlock(T, 0, T.Length, null, 0);
             h3.TransformBlock(infoBytes, 0, infoBytes.Length, null, 0);
             h3.TransformFinalBlock(new[] { counter }, 0, 1);
@@ -116,7 +121,7 @@ namespace Hoddmir.Core.Encryption
             okm2.AsSpan(0, 32).CopyTo(kmac);
 
             Array.Clear(T, 0, T.Length);
-            CryptographicOperations.ZeroMemory(prk);
+            CryptographicOperations.ZeroMemory(privateKey);
         }
 
         // AES-CTR (nonce 12B || counter 4B BE, starting at 1)
