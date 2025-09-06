@@ -94,7 +94,7 @@ namespace Hoddmir.Storage
 
             if (len == 0)
             {
-                byte[] dek = RandomBytes(32);
+                byte[] dek = MemoryBlockHelpers.RandomBytes(32);
 
                 // Write headers
 
@@ -171,7 +171,7 @@ namespace Hoddmir.Storage
                 throw new ArgumentException("Empty ID");
 
             byte[] keyBytes = Encoding.UTF8.GetBytes(id);
-            byte[] nonce = RandomBytes(GCMNonceLen);
+            byte[] nonce = MemoryBlockHelpers.RandomBytes(GCMNonceLen);
             long seq = Interlocked.Increment(ref nextSeq);
             byte op = 0;
 
@@ -328,7 +328,7 @@ namespace Hoddmir.Storage
                 return;
 
             byte[] keyBytes = Encoding.UTF8.GetBytes(id);
-            byte[] nonce = RandomBytes(GCMNonceLen);
+            byte[] nonce = MemoryBlockHelpers.RandomBytes(GCMNonceLen);
             long seq = Interlocked.Increment(ref nextSeq);
             byte op = 1;
             int keyLen = keyBytes.Length, ctLen = 0;
@@ -430,7 +430,7 @@ namespace Hoddmir.Storage
                         continue;
 
                     byte[] keyBytes = Encoding.UTF8.GetBytes(id);
-                    byte[] nonce = RandomBytes(GCMNonceLen);
+                    byte[] nonce = MemoryBlockHelpers.RandomBytes(GCMNonceLen);
                     long seq = Interlocked.Increment(ref newSeq);
                     byte op = 0;
                     byte[] aad = new byte[17];
@@ -514,14 +514,7 @@ namespace Hoddmir.Storage
         //    return new (temporaryKey, temporaryKey.Length); 
         //}
 
-        static byte[] RandomBytes(int n) 
-        {
-            byte[] b = new byte[n]; 
-
-            RandomNumberGenerator.Fill(b); 
-            return b; 
-        }
-
+      
         static async Task CopyHeaderAsync(IAppendOnlyStoreProvider storeProvider, 
                                           Stream destination, 
                                           CancellationToken cancellationToken = default)
@@ -681,7 +674,7 @@ namespace Hoddmir.Storage
                         TimeSpan timeTarget = TimeSpan.FromMilliseconds(500);
                         IArgon2idParamsProvider? currentArgonProvider = (argonParametersProvider ?? new CalibratingArgon2idParamsProvider(timeTarget));
                         Argon2idParams argon2IdParams = currentArgonProvider.GetParameters();
-                        byte[] salt = RandomBytes(16);
+                        byte[] salt = MemoryBlockHelpers.RandomBytes(16);
                         byte[] passwordTemp = passwordUtf8.ToArray();
 
                         byte[] kek = argonKeyProvider.DeriveKekArgon2id(passwordTemp, 
@@ -691,7 +684,7 @@ namespace Hoddmir.Storage
                                                        argon2IdParams.Parallelism);
                         CryptographicOperations.ZeroMemory(passwordTemp);
 
-                        byte[] nonce = RandomBytes(GCMNonceLen);
+                        byte[] nonce = MemoryBlockHelpers.RandomBytes(GCMNonceLen);
                         byte[] encDek = new byte[dek.Length];
                         byte[] tag = new byte[GCMTagLen];
 
@@ -743,7 +736,7 @@ namespace Hoddmir.Storage
                         if (passwordUtf8.IsEmpty) 
                             throw new ArgumentException("Password required for PBKDF2");
 
-                        byte[] salt = RandomBytes(16);
+                        byte[] salt = MemoryBlockHelpers.RandomBytes(16);
                         int iters = DefaultIteractions;
 
                         using Rfc2898DeriveBytes kdf = new (passwordUtf8.ToArray(), 
@@ -751,7 +744,7 @@ namespace Hoddmir.Storage
                                                             iters, 
                                                             HashAlgorithmName.SHA256);
                         byte[] kek = kdf.GetBytes(32);
-                        byte[] nonce = RandomBytes(GCMNonceLen);
+                        byte[] nonce = MemoryBlockHelpers.RandomBytes(GCMNonceLen);
                         byte[] encDek = new byte[dek.Length];
                         byte[] tag = new byte[GCMTagLen];
 
