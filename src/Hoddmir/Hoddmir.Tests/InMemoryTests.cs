@@ -1,8 +1,9 @@
 ﻿using Hoddmir.Core.Encryption;
+using Hoddmir.Core.Encryption.AEAD;
 using Hoddmir.Core.Keys;
 using Hoddmir.Storage;
 using Hoddmir.Storage.Providers;
-using System.Runtime.CompilerServices;
+using System.Diagnostics;
 using System.Text;
 
 namespace Hoddmir.Tests
@@ -45,28 +46,40 @@ namespace Hoddmir.Tests
 
 
         [TestMethod]
-        public async Task PutGetRoundtrip()
+        [DynamicData(nameof(GetTestsForAEADProviders), DynamicDataSourceType.Method)]
+        public async Task PutGetRoundtrip(IAEADProvider aeadProvider)
         {
             MemoryAppendOnlyStoreProvider memoryStore = new ();
-            EncryptedEntryStore store = await CreateStoreAsync(memoryStore);
+            EncryptedEntryStore store = await CreateStoreAsync(memoryStore, aeadProvider);
+
+            Trace.WriteLine($"Testing with AEAD provider: {aeadProvider}");
 
             string id = "user:42";
-            byte[] data = Encoding.UTF8.GetBytes("hello, world!");
+            string dataSource = $"hello, world! Provider: {aeadProvider.Name}";
+            byte[] data = Encoding.UTF8.GetBytes(dataSource);
 
             await store.PutAsync(id, data);
 
             byte[]? got = await store.GetAsync(id);
             Assert.IsNotNull(got, "GetAsync returned null");
             CollectionAssert.AreEqual(data, got!, "Decrypted payload doesn't match");
+            
+            string getResult = Encoding.UTF8.GetString(got!);
+            Assert.AreEqual(dataSource, 
+                            getResult, 
+                            $"Decrypted string doesn't match. Sent: {dataSource}, got {getResult}");
 
             await store.DisposeAsync();
         }
 
         [TestMethod]
-        public async Task DeleteRemovesFromListAndGetReturnsNull()
+        [DynamicData(nameof(GetTestsForAEADProviders), DynamicDataSourceType.Method)]
+        public async Task DeleteRemovesFromListAndGetReturnsNull(IAEADProvider aeadProvider)
         {
             MemoryAppendOnlyStoreProvider memoryStore = new ();
-            EncryptedEntryStore store = await CreateStoreAsync(memoryStore);
+            EncryptedEntryStore store = await CreateStoreAsync(memoryStore, aeadProvider);
+
+            Trace.WriteLine($"Testing with AEAD provider: {aeadProvider}");
 
             await store.PutAsync("a", Encoding.UTF8.GetBytes("A"));
             await store.PutAsync("b", Encoding.UTF8.GetBytes("B"));
@@ -137,6 +150,17 @@ namespace Hoddmir.Tests
             Assert.AreEqual("v2", Encoding.UTF8.GetString(after!));
 
             await store.DisposeAsync();
+        }
+
+        private static IEnumerable<object[]> GetTestsForAEADProviders()
+                    {
+            List<IAEADProvider> providers = new()
+            {
+                new AesGcmProvider(),
+                new AesCtrHmacSha256Provider(),
+                new ChaCha20Poly1305Provider()
+            };
+            return [.. providers.Select(p => new object[] { p })];
         }
     }
 

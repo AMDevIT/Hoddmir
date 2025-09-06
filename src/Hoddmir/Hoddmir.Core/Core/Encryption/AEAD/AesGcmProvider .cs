@@ -42,8 +42,8 @@ namespace Hoddmir.Core.Encryption.AEAD
 
         #region .ctor
 
-        public AesGcmProvider(int tagSizeBytes = TagSize)
-            : this(tagSizeBytes, null)
+        public AesGcmProvider()
+            : this(TagSize, null)
         {
 
         }
