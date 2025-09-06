@@ -9,7 +9,7 @@ using System.Text;
 namespace Hoddmir.Tests
 {
     [TestClass]
-    public sealed class InMemoryTests
+    public sealed class EncryptedStoreTests
     {
         #region Fields
 
