@@ -163,7 +163,7 @@ namespace Hoddmir.Core.Encryption.AEAD
         {
             using Aes aes = Aes.Create();
 
-            aes.Mode = CipherMode.ECB;
+            aes.Mode = CipherMode.CBC;
             aes.Padding = PaddingMode.None;
             aes.Key = kenc.ToArray();
 

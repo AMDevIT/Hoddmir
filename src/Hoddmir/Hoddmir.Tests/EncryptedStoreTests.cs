@@ -21,13 +21,7 @@ namespace Hoddmir.Tests
 
         #endregion
 
-        #region Methods
-
-        private static async Task<EncryptedEntryStore> CreateStoreAsync(MemoryAppendOnlyStoreProvider memoryStore)
-        {
-            IAEADProvider aeadProvider = new AesCtrHmacSha256Provider();
-            return await CreateStoreAsync(memoryStore, aeadProvider);
-        }
+        #region Methods       
 
         private static async Task<EncryptedEntryStore> CreateStoreAsync(MemoryAppendOnlyStoreProvider memoryStore,
                                                                         IAEADProvider aeadProvider)

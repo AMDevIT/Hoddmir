@@ -5,6 +5,22 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>$(MSBuildProjectName.Replace(" ", "_").Replace(".BouncyCastle",""))</RootNamespace>
+	  <Title>Hoddmir Core BouncyCastle addon</Title>
+	  <Authors>Alessandro Morvillo</Authors>
+	  <Company>AMDev.IT di Alessandro Morvillo</Company>
+	  <Product>Hoddmir</Product>
+	  <Description>Hoddmir is a library that implements cryptographic helpers using managed .NET APIs and well-known cryptographic libraries to provide classes with useful tools for third-party applications, such as easy-to-use secure storage or in-memory password vaults. This package allow the use of different cryptographic primitives using BouncyCastle library in operating system and net versions that doesn't implement them.</Description>
+	  <Copyright>2025 AMDev.IT di Alessandro Morvillo</Copyright>
+	  <PackageTags>vault;cryptographic;password;tools</PackageTags>
+	  <AssemblyVersion>0.0.1.0</AssemblyVersion>
+	  <FileVersion>$(AssemblyVersion)</FileVersion>
+	  <Version>$(AssemblyVersion)</Version>
+	  <PackageProjectUrl>https://github.com/AMDevIT/Hoddmir</PackageProjectUrl>
+	  <PackageReadmeFile>README.md</PackageReadmeFile>
+	  <PackageLicenseFile>LICENSE</PackageLicenseFile>
+	  <PackageRequireLicenseAcceptance>True</PackageRequireLicenseAcceptance>
+	  <PackageIcon>hoddmir_128.png</PackageIcon>
+	  <RepositoryUrl>https://github.com/AMDevIT/Hoddmir</RepositoryUrl>
   </PropertyGroup>
 
   <ItemGroup>
