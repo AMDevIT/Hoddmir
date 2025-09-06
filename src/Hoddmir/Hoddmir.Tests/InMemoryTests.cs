@@ -105,10 +105,13 @@ namespace Hoddmir.Tests
         }
 
         [TestMethod]
-        public async Task CompactShrinksUnderlyingLengthWhenThereAreTombstones()
+        [DynamicData(nameof(GetTestsForAEADProviders), DynamicDataSourceType.Method)]
+        public async Task CompactShrinksUnderlyingLengthWhenThereAreTombstones(IAEADProvider aeadProvider)
         {
             MemoryAppendOnlyStoreProvider memoryStore = new ();
-            EncryptedEntryStore store = await CreateStoreAsync(memoryStore);
+            EncryptedEntryStore store = await CreateStoreAsync(memoryStore, aeadProvider);
+
+            Trace.WriteLine($"Testing with AEAD provider: {aeadProvider}");
 
             await store.PutAsync("keep", Encoding.UTF8.GetBytes("live"));
             await store.PutAsync("gone", Encoding.UTF8.GetBytes("dead"));

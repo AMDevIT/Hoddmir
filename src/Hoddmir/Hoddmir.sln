@@ -9,6 +9,16 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Hoddmir.Tests", "Hoddmir.Te
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Hoddmir.Core.BouncyCastle", "Hoddmir.Core.BouncyCastle\Hoddmir.Core.BouncyCastle.csproj", "{F96E059E-3674-4A52-87CF-3D58A9F2B9E8}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Libraries", "Libraries", "{6C83A596-D32D-B35F-00DD-F0C99B673980}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Tests", "Tests", "{D67D4C0A-B945-473D-B2AF-5668D0D531E3}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "General", "General", "{9DF70304-0A22-CE1E-AA12-D5904EE55694}"
+	ProjectSection(SolutionItems) = preProject
+		..\..\LICENSE = ..\..\LICENSE
+		..\..\README.md = ..\..\README.md
+	EndProjectSection
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -30,6 +40,11 @@ Global
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{0CD1BF6C-4FB4-4335-B9F9-451DFEE5F7FD} = {6C83A596-D32D-B35F-00DD-F0C99B673980}
+		{DF6EF766-2BD4-47F8-B38F-A5FF02AD534F} = {D67D4C0A-B945-473D-B2AF-5668D0D531E3}
+		{F96E059E-3674-4A52-87CF-3D58A9F2B9E8} = {6C83A596-D32D-B35F-00DD-F0C99B673980}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {E1C8EC15-0AF7-43EF-98B2-B87AC63090BD}
