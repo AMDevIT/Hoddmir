@@ -102,7 +102,7 @@ namespace Hoddmir.Storage
             // if length 0 -> create new, else open and rebuild
 
             long len = await storeProvider.GetLengthAsync(cancellationToken)
-                                .ConfigureAwait(false);           
+                                          .ConfigureAwait(false);           
 
             if (len == 0)
             {
@@ -141,12 +141,17 @@ namespace Hoddmir.Storage
                                                                           passwordUtf8,
                                                                           cancellationToken: cancellationToken)
                                                          .ConfigureAwait(false);
-                long nextSeq = await RebuildIndexAsync(storeProvider, dek, cancellationToken).ConfigureAwait(false);
+                
                 encryptedEntryStore = new (storeProvider,
                                            replacer,
                                            aeadProvider,
                                            dek, 
-                                           nextSeq);
+                                           0);
+                long nextSeq = await encryptedEntryStore.RebuildIndexAsync(storeProvider, 
+                                                                           dek, 
+                                                                           cancellationToken)
+                                                        .ConfigureAwait(false);
+                encryptedEntryStore.nextSeq = nextSeq;
             }
 
             return encryptedEntryStore;
@@ -550,78 +555,71 @@ namespace Hoddmir.Storage
             bw.Write(payload);
         }
 
-        static async Task<long> RebuildIndexAsync(IAppendOnlyStoreProvider storeProvider, 
-                                                  byte[] dek, 
-                                                  CancellationToken cancellationToken = default)
+        private async Task<long> RebuildIndexAsync(IAppendOnlyStoreProvider storeProvider,
+                                                   byte[] dek,
+                                                   CancellationToken ct = default)
         {
-            long pos = await HeaderEndOffsetAsync(storeProvider, cancellationToken).ConfigureAwait(false);
-            long fileLen = await storeProvider.GetLengthAsync(cancellationToken).ConfigureAwait(false);
-            var index = new Dictionary<string, IndexEntry>(StringComparer.Ordinal);
+            long pos = await HeaderEndOffsetAsync(storeProvider, ct).ConfigureAwait(false);
+            long fileLen = await storeProvider.GetLengthAsync(ct).ConfigureAwait(false);
+
+            // Ricostruisci su un nuovo dizionario, poi swap atomico
+            var newIndex = new Dictionary<string, IndexEntry>(StringComparer.Ordinal);
             long maxSeq = 0;
 
-            // Read buffer
-            byte[] buf = ArrayPool<byte>.Shared.Rent(1024 * 64);
+            // buffer per il prefisso fisso (17 byte)
+            byte[] prefix = new byte[17];
 
-            try
+            int nonceLen = this.aeadProvider.NonceSizeBytes;
+            int tagLen = this.aeadProvider.TagSizeBytes;
+
+            while (pos < fileLen)
             {
-                while (pos < fileLen)
-                {
-                    // leggi il minimo header record
-                    int need = 1 + 8 + 4 + 4 + GCMNonceLen;
-                    int got = await storeProvider.ReadAtAsync(pos, buf.AsMemory(0, need), cancellationToken).ConfigureAwait(false);
-                    if (got < need) break;
+                int got = await storeProvider.ReadAtAsync(pos, prefix, ct).ConfigureAwait(false);
+                if (got == 0) break;
+                if (got != prefix.Length) throw new InvalidDataException("Record troncato (prefix)");
 
-                    int off = 0;
-                    byte op = buf[off++];
+                byte op = prefix[0];
+                long seq = BinaryPrimitives.ReadInt64LittleEndian(prefix.AsSpan(1, 8));
+                int keyLen = BinaryPrimitives.ReadInt32LittleEndian(prefix.AsSpan(9, 4));
+                int ctLen = BinaryPrimitives.ReadInt32LittleEndian(prefix.AsSpan(13, 4));
 
-                    long seq = BinaryPrimitives.ReadInt64LittleEndian(buf.AsSpan(off, 8)); 
-                    off += 8;
+                // Calcola lunghezza rimanente in base al provider attuale
+                int restLen = nonceLen + keyLen + ctLen + tagLen;
+                if (restLen < 0) throw new InvalidDataException("Record length overflow");
 
-                    int keyLen = BinaryPrimitives.ReadInt32LittleEndian(buf.AsSpan(off, 4)); 
-                    off += 4;
+                // Leggi il resto del record
+                byte[] rest = new byte[restLen];
+                got = await storeProvider.ReadAtAsync(pos + prefix.Length, rest, ct).ConfigureAwait(false);
+                if (got != restLen) throw new InvalidDataException("Record troncato (body)");
 
-                    int ctLen = BinaryPrimitives.ReadInt32LittleEndian(buf.AsSpan(off, 4)); 
-                    off += 4 + GCMNonceLen;
+                // Estrai chiave (senza decifrare)
+                int off = 0;
+                // nonce := rest[0..nonceLen)
+                off += nonceLen;
+                ArraySegment<byte> keyBytes = new (rest, off, keyLen); 
 
-                    // off += GCMNonceLen;
+                off += keyLen;
+                // ct := rest[off..off+ctLen) ; tag := rest[...]
+                off += ctLen + tagLen;
 
-                    int total = 1 + 8 + 4 + 4 + GCMNonceLen + keyLen + ctLen + GCMTagLen;
+                // Aggiorna indice con LAST-WINS (seq più alta)
+                string id = Encoding.UTF8.GetString(keyBytes);
+                int total = prefix.Length + restLen;
+                newIndex[id] = new IndexEntry(seq, pos, total, Deleted: op == 1);
 
-                    if (total < 0 || total > 100_000_000) 
-                        break;
-
-                    // Read the entire record to recover the key (without decrypting)
-                    var rec = ArrayPool<byte>.Shared.Rent(total);
-                    try
-                    {
-                        got = await storeProvider.ReadAtAsync(pos, rec.AsMemory(0, total), cancellationToken).ConfigureAwait(false);
-                        if (got != total) 
-                            break;
-
-                        int o = 1 + 8 + 4 + 4 + GCMNonceLen;
-                        var keyBytes = rec.AsSpan(o, keyLen).ToArray();
-
-                        var key = Encoding.UTF8.GetString(keyBytes);
-                        var deleted = op == 1;
-                        index[key] = new IndexEntry(seq, pos, total, deleted);
-                        if (seq > maxSeq) maxSeq = seq;
-                    }
-                    finally 
-                    { 
-                        ArrayPool<byte>.Shared.Return(rec); 
-                    }
-
-                    pos += total;
-                }
-            }
-            finally 
-            { 
-                ArrayPool<byte>.Shared.Return(buf); 
+                if (seq > maxSeq) 
+                    maxSeq = seq;
+                pos += total;
             }
 
-            // Updated memory structure
+            // Swap atomico dell'indice
+            this.index.Clear();
+            foreach (var kv in newIndex) 
+                this.index[kv.Key] = kv.Value;
+
             return maxSeq;
         }
+
 
         static async Task<long> HeaderEndOffsetAsync(IAppendOnlyStoreProvider storeProvider, 
                                                      CancellationToken cancellationToken = default)
