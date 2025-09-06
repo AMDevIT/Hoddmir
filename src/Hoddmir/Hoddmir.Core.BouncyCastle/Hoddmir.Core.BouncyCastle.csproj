@@ -7,4 +7,13 @@
     <RootNamespace>$(MSBuildProjectName.Replace(" ", "_").Replace(".BouncyCastle",""))</RootNamespace>
   </PropertyGroup>
 
+  <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.8" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Hoddmir.Core\Hoddmir.Core.csproj" />
+  </ItemGroup>
+
 </Project>

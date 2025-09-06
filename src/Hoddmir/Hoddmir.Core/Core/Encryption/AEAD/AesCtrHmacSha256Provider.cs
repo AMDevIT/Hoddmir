@@ -1,17 +1,48 @@
-﻿using System.Buffers.Binary;
+﻿using Microsoft.Extensions.Logging;
+using System.Buffers.Binary;
 using System.Security.Cryptography;
 
-namespace Hoddmir.Core.Encryption
+
+namespace Hoddmir.Core.Encryption.AEAD
 {
     public sealed class AesCtrHmacSha256Provider 
         : IAEADProvider
     {
+        #region Consts
+
+        private const string ProviderName = "AES-CTR+HMAC-SHA256 (EtM)";
+        private const int KeySize = 32;
+        private const int NonceSize = 12;
+        private const int TagSize = 16;
+
+        #endregion
+
         #region Properties
 
-        public string Name => "AES-CTR+HMAC-SHA256 (EtM)";
-        public int KeySizeBytes => 32;   // input key
-        public int NonceSizeBytes => 12; // user-supplied part; counter usa 4 byte BE
-        public int TagSizeBytes => 16;   // MAC troncato a 16
+        public string Name => ProviderName;
+        public int KeySizeBytes => KeySize;   // input key
+        public int NonceSizeBytes => NonceSize; // user-supplied part; counter usa 4 byte BE
+        public int TagSizeBytes => TagSize;   // MAC troncato a 16
+
+        private ILogger? Logger
+        {
+            get;
+        }
+
+        #endregion
+
+        #region .ctor
+
+        public AesCtrHmacSha256Provider()
+            : this(null)
+        {
+
+        }
+
+        public AesCtrHmacSha256Provider(ILogger? logger)
+        {
+            this.Logger = logger;
+        }
 
         #endregion
 
@@ -96,28 +127,28 @@ namespace Hoddmir.Core.Encryption
             using HMACSHA256 hmac = new(new byte[32]);
             byte[] privateKey = hmac.ComputeHash(ikm.ToArray()); // 32B
 
-            byte[] T = Array.Empty<byte>();
+            byte[] T = [];
             byte counter = 1;
 
-            using HMACSHA256 hmacSecondPassage = new HMACSHA256(privateKey);
+            using HMACSHA256 hmacSecondPassage = new (privateKey);
             // Kenc
             hmacSecondPassage.Initialize();
             hmacSecondPassage.TransformBlock(T, 0, 0, null, 0);
-            var infoBytes = System.Text.Encoding.ASCII.GetBytes(info);
+            byte[] infoBytes = System.Text.Encoding.ASCII.GetBytes(info);
             hmacSecondPassage.TransformBlock(infoBytes, 0, infoBytes.Length, null, 0);
-            hmacSecondPassage.TransformFinalBlock(new[] { counter }, 0, 1);
-            var okm1 = hmacSecondPassage.Hash!;
+            hmacSecondPassage.TransformFinalBlock([counter], 0, 1);
+            byte[] okm1 = hmacSecondPassage.Hash!;
             okm1.AsSpan(0, 32)
                 .CopyTo(kenc);
             T = okm1; 
             counter++;
 
             // Kmac
-            using var h3 = new HMACSHA256(privateKey);
+            using HMACSHA256 h3 = new HMACSHA256(privateKey);
             h3.TransformBlock(T, 0, T.Length, null, 0);
             h3.TransformBlock(infoBytes, 0, infoBytes.Length, null, 0);
-            h3.TransformFinalBlock(new[] { counter }, 0, 1);
-            var okm2 = h3.Hash!;
+            h3.TransformFinalBlock([counter], 0, 1);
+            byte[] okm2 = h3.Hash!;
             okm2.AsSpan(0, 32).CopyTo(kmac);
 
             Array.Clear(T, 0, T.Length);
@@ -125,15 +156,18 @@ namespace Hoddmir.Core.Encryption
         }
 
         // AES-CTR (nonce 12B || counter 4B BE, starting at 1)
-        static void AesCtrXor(ReadOnlySpan<byte> kenc, ReadOnlySpan<byte> nonce,
-                              ReadOnlySpan<byte> input, Span<byte> output)
+        static void AesCtrXor(ReadOnlySpan<byte> kenc, 
+                              ReadOnlySpan<byte> nonce,
+                              ReadOnlySpan<byte> input, 
+                              Span<byte> output)
         {
-            using var aes = Aes.Create();
+            using Aes aes = Aes.Create();
+
             aes.Mode = CipherMode.ECB;
             aes.Padding = PaddingMode.None;
             aes.Key = kenc.ToArray();
 
-            using var enc = aes.CreateEncryptor();
+            using ICryptoTransform enc = aes.CreateEncryptor();
             Span<byte> counterBlock = stackalloc byte[16];
             nonce.CopyTo(counterBlock[..12]);
             uint counter = 1;
@@ -153,6 +187,13 @@ namespace Hoddmir.Core.Encryption
                 counter++;
                 offset += n;
             }
+        }
+
+        public override string ToString()
+        {
+            return $"Provider: {this.Name}, KeySize: {this.KeySizeBytes * 8} bits, " +
+                   $"NonceSize: {this.NonceSizeBytes} bytes, " +
+                   $"TagSize: {this.TagSizeBytes} bytes";
         }
 
         #endregion
