@@ -13,6 +13,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Hoddmir.Core.BouncyCastle\Hoddmir.Core.BouncyCastle.csproj" />
     <ProjectReference Include="..\Hoddmir.Core\Hoddmir.Core.csproj" />
   </ItemGroup>
 
