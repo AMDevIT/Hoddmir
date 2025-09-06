@@ -26,7 +26,9 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: '8.x'
+        dotnet-version: | 
+          '8.x'
+          '9.0.x'
 
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v3
@@ -47,8 +49,7 @@ jobs:
         if [ -z "$TARGET" ]; then
           echo "No .sln o .csproj found in the repository"; exit 1
         fi
-        echo "Building: $TARGET"
-        dotnet restore "$TARGET" -c Release --framework net8.0
+        echo "Building: $TARGET"        
         dotnet build "$TARGET" -c Release --no-restore -f net8.0
     
 
