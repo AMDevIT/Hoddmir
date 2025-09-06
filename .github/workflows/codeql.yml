@@ -50,6 +50,7 @@ jobs:
           echo "No .sln o .csproj found in the repository"; exit 1
         fi
         echo "Building: $TARGET"        
+        dotnet restore "$TARGET" -c Release
         dotnet build "$TARGET" -c Release --no-restore -f net8.0
     
 
