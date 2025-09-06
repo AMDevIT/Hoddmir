@@ -1,4 +1,5 @@
-﻿using Hoddmir.Core.Keys;
+﻿using Hoddmir.Core.Encryption;
+using Hoddmir.Core.Keys;
 using Hoddmir.Core.Keys.Calibration;
 using Hoddmir.Core.Memory;
 using System.Buffers;
@@ -9,7 +10,8 @@ using System.Text;
 
 namespace Hoddmir.Storage
 {
-    public sealed class EncryptedEntryStore : IAsyncDisposable
+    public sealed class EncryptedEntryStore 
+        : IAsyncDisposable
     {
         // File format (little endian)
         // [MAGIC(4)="EES1"][VER(1)=0x01][KeyMode(1)][HeaderLen(4)][HeaderPayload]
@@ -41,6 +43,7 @@ namespace Hoddmir.Storage
 
         private readonly IAppendOnlyStoreProvider storeProvider;
         private readonly IAtomicReplace replacer;
+        private readonly IAEADProvider aeadProvider;
         private readonly SensitiveBytes dek;
 
         private long nextSeq;
@@ -52,14 +55,16 @@ namespace Hoddmir.Storage
 
         #region .ctor
 
-        private EncryptedEntryStore(IAppendOnlyStoreProvider dev, 
+        private EncryptedEntryStore(IAppendOnlyStoreProvider storeProvider, 
                                     IAtomicReplace replacer, 
+                                    IAEADProvider aeadProvider,
                                     byte[] dek, 
                                     long nextSeq)
         {
-            this.storeProvider = dev;
+            this.storeProvider = storeProvider;
             this.replacer = replacer;
             this.dek = new SensitiveBytes(32);
+            this.aeadProvider = aeadProvider;
 
             dek.CopyTo(this.dek.AsSpan());
 
@@ -73,9 +78,11 @@ namespace Hoddmir.Storage
         // Open with password as UTF-8 bytes (no string)
         public static async Task<EncryptedEntryStore> OpenAsync(IAppendOnlyStoreProvider storeProvider,
                                                                 IAtomicReplace replacer,
+                                                                IAEADProvider aeadProvider,
                                                                 KeyProtectionMode mode,
                                                                 byte[] passwordUtf8,
-                                                                IArgon2idParamsProvider? argonParams = null,
+                                                                IArgon2idParamsProvider? argonParamsProvider = null,
+                                                                IArgonKeyProvider? argonKeyProvider = null,
                                                                 CancellationToken cancellationToken = default)
         {
             EncryptedEntryStore encryptedEntryStore;
@@ -93,25 +100,41 @@ namespace Hoddmir.Storage
 
                 using MemoryStream ms = new (DefaultMemoryBufferDimension);
 
-                WriteHeader(ms, dek, mode, passwordUtf8, argonParams);
+                WriteHeader(ms, 
+                            dek, 
+                            mode, 
+                            passwordUtf8, 
+                            argonParamsProvider,
+                            aeadProvider, 
+                            argonKeyProvider);
+
                 await storeProvider.AppendAsync(ms.ToArray(), cancellationToken)
                          .ConfigureAwait(false);
                 await storeProvider.FlushAsync(true, cancellationToken)
                          .ConfigureAwait(false);
-                encryptedEntryStore =  new (storeProvider, replacer, dek, nextSeq: 0);
+                encryptedEntryStore =  new (storeProvider, 
+                                            replacer, 
+                                            aeadProvider,
+                                            dek, 
+                                            nextSeq: 0);
             }
             else
             {               
 
                 // Read headers
 
-                (byte[] dek, KeyProtectionMode _) = await ReadHeaderAsync(storeProvider, 
+                (byte[] dek, KeyProtectionMode _) = await ReadHeaderAsync(storeProvider,
+                                                                          aeadProvider,
                                                                           mode, 
                                                                           passwordUtf8,
                                                                           cancellationToken: cancellationToken)
                                                          .ConfigureAwait(false);
                 long nextSeq = await RebuildIndexAsync(storeProvider, dek, cancellationToken).ConfigureAwait(false);
-                encryptedEntryStore = new (storeProvider, replacer, dek, nextSeq);
+                encryptedEntryStore = new (storeProvider,
+                                           replacer,
+                                           aeadProvider,
+                                           dek, 
+                                           nextSeq);
             }
 
             return encryptedEntryStore;
@@ -120,23 +143,29 @@ namespace Hoddmir.Storage
         // Back-compat: string (sconsigliato, ma utile)
         public static Task<EncryptedEntryStore> OpenAsync(IAppendOnlyStoreProvider dev,
                                                           IAtomicReplace replacer,
+                                                          IAEADProvider aeadProvider,
                                                           KeyProtectionMode mode,
                                                           string? password,
                                                           IArgon2idParamsProvider? argonParams = null,
+                                                          IArgonKeyProvider? argonKeyProvider = null,
                                                           CancellationToken cancellationToken = default)
         {
             byte[]? pw = password is null ? [] : Encoding.UTF8.GetBytes(password);
             return OpenAsync(dev, 
                              replacer, 
+                             aeadProvider,
                              mode, 
                              pw, 
                              argonParams, 
+                             argonKeyProvider, 
                              cancellationToken);
         }
 
 
 
-        public async Task PutAsync(string id, ReadOnlyMemory<byte> value, CancellationToken ct = default)
+        public async Task PutAsync(string id, 
+                                   ReadOnlyMemory<byte> value, 
+                                   CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrEmpty(id)) 
                 throw new ArgumentException("Empty ID");
@@ -153,20 +182,29 @@ namespace Hoddmir.Storage
             BinaryPrimitives.WriteInt32LittleEndian(aad.AsSpan()[9..], keyBytes.Length);
             BinaryPrimitives.WriteInt32LittleEndian(aad.AsSpan()[13..], value.Length);
 
-            byte[] ctBuf = new byte[value.Length];
+            byte[] cipherTextBuffer = new byte[value.Length];
             byte[] tag = new byte[GCMTagLen];
 
-            byte[] tmpKey;
-            using (AesGcm gcm = CreateGcm(out tmpKey))
-            gcm.Encrypt(nonce.AsSpan(), 
-                        value.Span, 
-                        ctBuf.AsSpan(), 
-                        tag.AsSpan(), 
-                        aad.AsSpan());
-            CryptographicOperations.ZeroMemory(tmpKey);
+            // byte[] tmpKey;
+
+            this.aeadProvider.Encrypt(dek.AsSpan(),
+                                      nonce.AsSpan(),
+                                      aad.AsSpan(),
+                                      value.Span,
+                                      cipherTextBuffer.AsSpan(),
+                                      tag.AsSpan());
+
+            //using (AesGcm gcm = CreateGcm(out tmpKey))
+            //gcm.Encrypt(nonce.AsSpan(), 
+            //            value.Span, 
+            //            cipherTextBuffer.AsSpan(), 
+            //            tag.AsSpan(), 
+            //            aad.AsSpan());
+
+            // CryptographicOperations.ZeroMemory(tmpKey);
 
             // serialize record
-            int total = 1 + 8 + 4 + 4 + GCMNonceLen + keyBytes.Length + ctBuf.Length + GCMTagLen;
+            int total = 1 + 8 + 4 + 4 + GCMNonceLen + keyBytes.Length + cipherTextBuffer.Length + GCMTagLen;
             byte[] buf = ArrayPool<byte>.Shared.Rent(total);
             try
             {
@@ -175,7 +213,7 @@ namespace Hoddmir.Storage
                 span[off++] = op;
                 BinaryPrimitives.WriteInt64LittleEndian(span.Slice(off, 8), seq); off += 8;
                 BinaryPrimitives.WriteInt32LittleEndian(span.Slice(off, 4), keyBytes.Length); off += 4;
-                BinaryPrimitives.WriteInt32LittleEndian(span.Slice(off, 4), ctBuf.Length); off += 4;
+                BinaryPrimitives.WriteInt32LittleEndian(span.Slice(off, 4), cipherTextBuffer.Length); off += 4;
 
                 Buffer.BlockCopy(nonce, 0, span.Array!, span.Offset + off, GCMNonceLen);
                 off += GCMNonceLen;
@@ -183,22 +221,22 @@ namespace Hoddmir.Storage
                 Buffer.BlockCopy(keyBytes, 0, span.Array!, span.Offset + off, keyBytes.Length);
                 off += keyBytes.Length;
 
-                Buffer.BlockCopy(ctBuf, 0, span.Array!, span.Offset + off, ctBuf.Length);
-                off += ctBuf.Length;
+                Buffer.BlockCopy(cipherTextBuffer, 0, span.Array!, span.Offset + off, cipherTextBuffer.Length);
+                off += cipherTextBuffer.Length;
 
                 Buffer.BlockCopy(tag, 0, span.Array!, span.Offset + off, GCMTagLen);
                 off += GCMTagLen;
 
-                long currentLen = await storeProvider.GetLengthAsync(ct).ConfigureAwait(false);
-                await storeProvider.AppendAsync(span.Slice(0, total).ToArray(), ct).ConfigureAwait(false);
-                await storeProvider.FlushAsync(true, ct).ConfigureAwait(false);
+                long currentLen = await storeProvider.GetLengthAsync(cancellationToken).ConfigureAwait(false);
+                await storeProvider.AppendAsync(span.Slice(0, total).ToArray(), cancellationToken).ConfigureAwait(false);
+                await storeProvider.FlushAsync(true, cancellationToken).ConfigureAwait(false);
 
                 index[id] = new IndexEntry(seq, currentLen, total, Deleted: false);
             }
             finally
             {
                 ArrayPool<byte>.Shared.Return(buf);
-                CryptographicOperations.ZeroMemory(ctBuf);
+                CryptographicOperations.ZeroMemory(cipherTextBuffer);
             }
         }
 
@@ -595,6 +633,7 @@ namespace Hoddmir.Storage
                                 KeyProtectionMode mode, 
                                 ReadOnlySpan<byte> passwordUtf8, 
                                 IArgon2idParamsProvider? argonParametersProvider,
+                                IAEADProvider aeadProvider,
                                 IArgonKeyProvider? argonKeyProvider = null)
         {
             if (argonKeyProvider == null)
@@ -630,9 +669,12 @@ namespace Hoddmir.Storage
                         byte[] nonce = RandomBytes(GCMNonceLen);
                         byte[] encDek = new byte[dek.Length];
                         byte[] tag = new byte[GCMTagLen];
-                        using (AesGcm g = new (kek)) 
 
-                        g.Encrypt(nonce, dek, encDek, tag, ReadOnlySpan<byte>.Empty);
+                        //using (AesGcm g = new (kek)) 
+                        //g.Encrypt(nonce, dek, encDek, tag, ReadOnlySpan<byte>.Empty);
+
+                        aeadProvider.Encrypt(kek, nonce, ReadOnlySpan<byte>.Empty, dek, encDek, tag);
+
 
                         CryptographicOperations.ZeroMemory(kek);
 
@@ -724,14 +766,15 @@ namespace Hoddmir.Storage
         [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", 
                                                          "CA1416", 
                                                          Justification = "When not on Windows, an exception is thrown")]
-        static async Task<(byte[] Dek, KeyProtectionMode Mode)> ReadHeaderAsync(IAppendOnlyStoreProvider dev, 
-                                                                                KeyProtectionMode expected, 
+        static async Task<(byte[] Dek, KeyProtectionMode Mode)> ReadHeaderAsync(IAppendOnlyStoreProvider storeProvider,
+                                                                                IAEADProvider aeadProvider,
+                                                                                KeyProtectionMode expected,
                                                                                 byte[] passwordUTF8,
                                                                                 IArgonKeyProvider? argonKeyProvider = null,
                                                                                 CancellationToken cancellationToken = default)
         {
             byte[] fixedHdr = new byte[4 + 1 + 1 + 4];
-            int got = await dev.ReadAtAsync(0, fixedHdr, cancellationToken)
+            int got = await storeProvider.ReadAtAsync(0, fixedHdr, cancellationToken)
                                .ConfigureAwait(false);
 
             if (argonKeyProvider == null)
@@ -754,7 +797,7 @@ namespace Hoddmir.Storage
 
             byte[] payload = new byte[headerLen];
 
-            got = await dev.ReadAtAsync(fixedHdr.Length, 
+            got = await storeProvider.ReadAtAsync(fixedHdr.Length, 
                                         payload, 
                                         cancellationToken)
                            .ConfigureAwait(false);
@@ -804,12 +847,16 @@ namespace Hoddmir.Storage
 
                         try
                         {
-                            using AesGcm aesGcm = new (kek);
-                            aesGcm.Decrypt(nonce, 
-                                           encDek, 
-                                           tag, 
-                                           dek, 
-                                           ReadOnlySpan<byte>.Empty);
+
+                            aeadProvider.Decrypt(kek, nonce, ReadOnlySpan<byte>.Empty, encDek, tag, dek);
+
+                            
+                            //using AesGcm aesGcm = new (kek);
+                            //aesGcm.Decrypt(nonce, 
+                            //               encDek, 
+                            //               tag, 
+                            //               dek, 
+                            //               ReadOnlySpan<byte>.Empty);
                         }
                         finally
                         {
@@ -860,6 +907,7 @@ namespace Hoddmir.Storage
                         byte[] dek = new byte[encDek.Length];
                         try 
                         { 
+                            
                             using AesGcm aesGcm = new (kek); 
                             aesGcm.Decrypt(nonce, 
                                            encDek, 
