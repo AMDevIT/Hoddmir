@@ -1,5 +1,6 @@
 ﻿using Hoddmir.Core.Encryption;
 using Hoddmir.Core.Encryption.AEAD;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -8,14 +9,6 @@ namespace Hoddmir.Tests
     [TestClass]
     public class AEADProvidersTests
     {
-        // Elenco provider da testare
-        private static IAEADProvider[] Providers =>
-        [
-            new AesGcmProvider(tagSizeBytes: 16),
-            new ChaCha20Poly1305Provider(),
-            new AesCtrHmacSha256Provider(),
-        ];
-
         // Helper: genera riempimenti riproducibili
         private static byte[] Rnd(int len)
         {
@@ -42,8 +35,11 @@ namespace Hoddmir.Tests
         }
 
         [TestMethod]
-        public void RoundTripVariousLengthsAndAAD()
+        [DynamicData(nameof(GetProviders), DynamicDataSourceType.Method)]
+        public void RoundTripVariousLengthsAndAAD(IAEADProvider aeadProvider)
         {
+            Trace.WriteLine($"Using provider: {aeadProvider}");
+
             var pts = new[]
             {
                 Array.Empty<byte>(),
@@ -63,166 +59,178 @@ namespace Hoddmir.Tests
                 Rnd(17),
             };
 
-            foreach (var p in Providers)
+            foreach (var pt in pts)
             {
-                foreach (var pt in pts)
+                foreach (var aad in aads)
                 {
-                    foreach (var aad in aads)
-                    {
-                        RoundTripOnce(p, pt, aad);
-                    }
+                    RoundTripOnce(aeadProvider, pt, aad);
                 }
-            }
+            }            
         }
 
         [TestMethod]
-        public void RoundTripEmptyPlaintextTombstoneLike()
+        [DynamicData(nameof(GetProviders), DynamicDataSourceType.Method)]
+        public void RoundTripEmptyPlaintextTombstoneLike(IAEADProvider aeadProvider)
         {
-            foreach (var p in Providers)
-            {
-                var key = Rnd(p.KeySizeBytes);
-                var nonce = Rnd(p.NonceSizeBytes);
-                var aad = Rnd(17);
+            Trace.WriteLine($"Using provider: {aeadProvider}");
+            
+            var key = Rnd(aeadProvider.KeySizeBytes);
+            var nonce = Rnd(aeadProvider.NonceSizeBytes);
+            var aad = Rnd(17);
 
-                var ct = Array.Empty<byte>();
-                var tag = new byte[p.TagSizeBytes];
+            var ct = Array.Empty<byte>();
+            var tag = new byte[aeadProvider.TagSizeBytes];
 
-                // Encrypt con pt vuoto
-                p.Encrypt(key, nonce, aad, Array.Empty<byte>(), ct, tag);
+            // Encrypt con pt vuoto
+            aeadProvider.Encrypt(key, nonce, aad, Array.Empty<byte>(), ct, tag);
 
-                var outPt = Array.Empty<byte>();
-                var ok = p.Decrypt(key, nonce, aad, ct, tag, outPt);
-                Assert.IsTrue(ok, $"{p.Name}: decrypt empty-pt fallita");
-            }
+            var outPt = Array.Empty<byte>();
+            var ok = aeadProvider.Decrypt(key, nonce, aad, ct, tag, outPt);
+            Assert.IsTrue(ok, $"{aeadProvider.Name}: decrypt empty-pt fallita");            
         }
 
         [TestMethod]
-        public void DeterministicSameInputsProduceSameOutputs()
+        [DynamicData(nameof(GetProviders), DynamicDataSourceType.Method)]
+        public void DeterministicSameInputsProduceSameOutputs(IAEADProvider aeadProvider)
         {
-            foreach (var p in Providers)
-            {
-                var key = Rnd(p.KeySizeBytes);
-                var nonce = Rnd(p.NonceSizeBytes);
-                var aad = Rnd(9);
-                var pt = Rnd(64);
+            Trace.WriteLine($"Using provider: {aeadProvider}");
 
-                var ct1 = new byte[pt.Length];
-                var tag1 = new byte[p.TagSizeBytes];
-                p.Encrypt(key, nonce, aad, pt, ct1, tag1);
+            var key = Rnd(aeadProvider.KeySizeBytes);
+            var nonce = Rnd(aeadProvider.NonceSizeBytes);
+            var aad = Rnd(9);
+            var pt = Rnd(64);
 
-                var ct2 = new byte[pt.Length];
-                var tag2 = new byte[p.TagSizeBytes];
-                p.Encrypt(key, nonce, aad, pt, ct2, tag2);
+            var ct1 = new byte[pt.Length];
+            var tag1 = new byte[aeadProvider.TagSizeBytes];
+            aeadProvider.Encrypt(key, nonce, aad, pt, ct1, tag1);
 
-                CollectionAssert.AreEqual(ct1, ct2, $"{p.Name}: CT differente a parità di input");
-                CollectionAssert.AreEqual(tag1, tag2, $"{p.Name}: TAG differente a parità di input");
-            }
+            var ct2 = new byte[pt.Length];
+            var tag2 = new byte[aeadProvider.TagSizeBytes];
+            aeadProvider.Encrypt(key, nonce, aad, pt, ct2, tag2);
+
+            CollectionAssert.AreEqual(ct1, ct2, $"{aeadProvider.Name}: CT differente a parità di input");
+            CollectionAssert.AreEqual(tag1, tag2, $"{aeadProvider.Name}: TAG differente a parità di input");            
         }
 
         [TestMethod]
-        public void TamperDetectionFailsOnCTTAGNONCEAAD()
+        [DynamicData(nameof(GetProviders), DynamicDataSourceType.Method)]
+        public void TamperDetectionFails(IAEADProvider aeadProvider)
         {
-            foreach (var p in Providers)
+            Trace.WriteLine($"Using provider: {aeadProvider}");
+
+            var key = Rnd(aeadProvider.KeySizeBytes);
+            var nonce = Rnd(aeadProvider.NonceSizeBytes);
+            var aad = Rnd(11);
+            var pt = Rnd(128);
+
+            var ct = new byte[pt.Length];
+            var tag = new byte[aeadProvider.TagSizeBytes];
+
+            aeadProvider.Encrypt(key, nonce, aad, pt, ct, tag);
+
+            byte[] ptOut;
+
+            // Flip CT
             {
-                var key = Rnd(p.KeySizeBytes);
-                var nonce = Rnd(p.NonceSizeBytes);
-                var aad = Rnd(11);
-                var pt = Rnd(128);
-
-                var ct = new byte[pt.Length];
-                var tag = new byte[p.TagSizeBytes];
-
-                p.Encrypt(key, nonce, aad, pt, ct, tag);
-
-                byte[] ptOut;
-
-                // Flip CT
-                {
-                    var ctX = (byte[])ct.Clone();
-                    ctX[0] ^= 0x01;
-                    ptOut = new byte[pt.Length];
-                    var ok = p.Decrypt(key, nonce, aad, ctX, tag, ptOut);
-                    Assert.IsFalse(ok, $"{p.Name}: tamper CT non rilevato");
-                }
-
-                // Flip TAG
-                {
-                    var tagX = (byte[])tag.Clone();
-                    tagX[^1] ^= 0x80;
-                    ptOut = new byte[pt.Length];
-                    var ok = p.Decrypt(key, nonce, aad, ct, tagX, ptOut);
-                    Assert.IsFalse(ok, $"{p.Name}: tamper TAG non rilevato");
-                }
-
-                // Flip NONCE
-                {
-                    var nonceX = (byte[])nonce.Clone();
-                    nonceX[3] ^= 0x20;
-                    ptOut = new byte[pt.Length];
-                    var ok = p.Decrypt(key, nonceX, aad, ct, tag, ptOut);
-                    Assert.IsFalse(ok, $"{p.Name}: tamper NONCE non rilevato");
-                }
-
-                // Flip AAD
-                {
-                    var aadX = (byte[])aad.Clone();
-                    if (aadX.Length == 0) aadX = new byte[] { 0x00 };
-                    aadX[^1] ^= 0x10;
-                    ptOut = new byte[pt.Length];
-                    var ok = p.Decrypt(key, nonce, aadX, ct, tag, ptOut);
-                    Assert.IsFalse(ok, $"{p.Name}: tamper AAD non rilevato");
-                }
+                var ctX = (byte[])ct.Clone();
+                ctX[0] ^= 0x01;
+                ptOut = new byte[pt.Length];
+                var ok = aeadProvider.Decrypt(key, nonce, aad, ctX, tag, ptOut);
+                Assert.IsFalse(ok, $"{aeadProvider.Name}: tamper CT non rilevato");
             }
+
+            // Flip TAG
+            {
+                var tagX = (byte[])tag.Clone();
+                tagX[^1] ^= 0x80;
+                ptOut = new byte[pt.Length];
+                var ok = aeadProvider.Decrypt(key, nonce, aad, ct, tagX, ptOut);
+                Assert.IsFalse(ok, $"{aeadProvider.Name}: tamper TAG non rilevato");
+            }
+
+            // Flip NONCE
+            {
+                var nonceX = (byte[])nonce.Clone();
+                nonceX[3] ^= 0x20;
+                ptOut = new byte[pt.Length];
+                var ok = aeadProvider.Decrypt(key, nonceX, aad, ct, tag, ptOut);
+                Assert.IsFalse(ok, $"{aeadProvider.Name}: tamper NONCE non rilevato");
+            }
+
+            // Flip AAD
+            {
+                byte[] aadX = (byte[])aad.Clone();
+                if (aadX.Length == 0) 
+                    aadX = [0x00];
+
+                aadX[^1] ^= 0x10;
+                ptOut = new byte[pt.Length];
+                var ok = aeadProvider.Decrypt(key, nonce, aadX, ct, tag, ptOut);
+                Assert.IsFalse(ok, $"{aeadProvider.Name}: tamper AAD non rilevato");
+            }
+        }        
+
+        [TestMethod]
+        [DynamicData(nameof(GetProviders), DynamicDataSourceType.Method)]
+        public void WrongKeyFails(IAEADProvider aeadProvider)
+        {
+            Trace.WriteLine($"Using provider: {aeadProvider}");
+
+            var key1 = Rnd(aeadProvider.KeySizeBytes);
+            var key2 = Rnd(aeadProvider.KeySizeBytes);
+            var nonce = Rnd(aeadProvider.NonceSizeBytes);
+            var aad = Rnd(5);
+            var pt = Rnd(32);
+
+            var ct = new byte[pt.Length];
+            var tag = new byte[aeadProvider.TagSizeBytes];
+
+            aeadProvider.Encrypt(key1, nonce, aad, pt, ct, tag);
+
+            var outPt = new byte[pt.Length];
+            var ok = aeadProvider.Decrypt(key2, nonce, aad, ct, tag, outPt);
+            Assert.IsFalse(ok, $"{aeadProvider.Name}: decrypt con chiave errata dovrebbe fallire");
         }
 
         [TestMethod]
-        public void WrongKeyFails()
+        [DynamicData(nameof(GetProviders), DynamicDataSourceType.Method)]
+        public void SizeChecksThrowOrFailAsExpected(IAEADProvider aeadProvider)
         {
-            foreach (var p in Providers)
+            Trace.WriteLine($"Using provider: {aeadProvider}");
+            var key = Rnd(aeadProvider.KeySizeBytes);
+            var nonce = Rnd(aeadProvider.NonceSizeBytes);
+            var aad = Array.Empty<byte>();
+            var pt = Rnd(8);
+            var ct = new byte[pt.Length];
+            var tag = new byte[aeadProvider.TagSizeBytes];
+
+            // Encrypt con nonce sbagliato → ArgumentException
+            Assert.ThrowsException<ArgumentException>(() =>
             {
-                var key1 = Rnd(p.KeySizeBytes);
-                var key2 = Rnd(p.KeySizeBytes);
-                var nonce = Rnd(p.NonceSizeBytes);
-                var aad = Rnd(5);
-                var pt = Rnd(32);
+                var badNonce = Rnd(aeadProvider.NonceSizeBytes + 1);
+                aeadProvider.Encrypt(key, badNonce, aad, pt, ct, tag);
+            }, $"{aeadProvider.Name}: Encrypt con nonce len errata non ha lanciato");
 
-                var ct = new byte[pt.Length];
-                var tag = new byte[p.TagSizeBytes];
-
-                p.Encrypt(key1, nonce, aad, pt, ct, tag);
-
-                var outPt = new byte[pt.Length];
-                var ok = p.Decrypt(key2, nonce, aad, ct, tag, outPt);
-                Assert.IsFalse(ok, $"{p.Name}: decrypt con chiave errata dovrebbe fallire");
+            // Decrypt con tag sbagliato → false
+            {
+                var badTag = Rnd(aeadProvider.TagSizeBytes + 1);
+                var ok = aeadProvider.Decrypt(key, nonce, aad, ct, badTag, pt);
+                Assert.IsFalse(ok, $"{aeadProvider.Name}: Decrypt con tag len errata non ha fallito");
             }
+            
         }
 
-        [TestMethod]
-        public void SizeChecksThrowOrFailAsExpected()
+        private static IEnumerable<object[]> GetProviders()
         {
-            foreach (var p in Providers)
-            {
-                var key = Rnd(p.KeySizeBytes);
-                var nonce = Rnd(p.NonceSizeBytes);
-                var aad = Array.Empty<byte>();
-                var pt = Rnd(8);
-                var ct = new byte[pt.Length];
-                var tag = new byte[p.TagSizeBytes];
 
-                // Encrypt con nonce sbagliato → ArgumentException
-                Assert.ThrowsException<ArgumentException>(() =>
-                {
-                    var badNonce = Rnd(p.NonceSizeBytes + 1);
-                    p.Encrypt(key, badNonce, aad, pt, ct, tag);
-                }, $"{p.Name}: Encrypt con nonce len errata non ha lanciato");
+            IAEADProvider[] providers =
+            [
+                new AesGcmProvider(tagSizeBytes: 16),
+                new ChaCha20Poly1305Provider(),
+                new AesCtrHmacSha256Provider(),
+            ];
 
-                // Decrypt con tag sbagliato → false
-                {
-                    var badTag = Rnd(p.TagSizeBytes + 1);
-                    var ok = p.Decrypt(key, nonce, aad, ct, badTag, pt);
-                    Assert.IsFalse(ok, $"{p.Name}: Decrypt con tag len errata non ha fallito");
-                }
-            }
+            return [.. providers.Select(p => new object[] { p })];
         }
     }
 }

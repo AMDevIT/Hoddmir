@@ -59,83 +59,82 @@ namespace Hoddmir.Core.Encryption.AEAD
                             Span<byte> tag)
         {
             if (key.Length != 32 || nonce.Length != 12 || tag.Length != 16)
+            {
+                this.Logger?.LogDebug("Bad key/nonce/tag size: {keyLen}/{nonceLen}/{tagLen}",
+                                      key.Length, nonce.Length, tag.Length);
                 throw new ArgumentException("Bad key/nonce/tag size");
+            }
 
-            if (ciphertext.Length != plaintext.Length) 
-                throw new ArgumentException("CipherText size != PlainText size");
+            if (ciphertext.Length != plaintext.Length)
+            {
+                this.Logger?.LogDebug("cipherText size != plainText size: {ctLen}/{ptLen}",
+                                      ciphertext.Length, plaintext.Length);
+                throw new ArgumentException("ct size != pt size");
+            }
 
-            KeyParameter keyParameter;
-            AeadParameters param;
-            ChaCha20Poly1305 aead = new ();
-           
-            keyParameter = new (key.ToArray());
-            param = new (keyParameter, 128, nonce.ToArray(), aad.ToArray());
-            aead.Init(true, param);
+            var aead = new ChaCha20Poly1305();
+            aead.Init(true, new ParametersWithIV(new KeyParameter(key.ToArray()), nonce.ToArray()));
 
-            // BouncyCastle emit CT||TAG: we write on the buffer then we split
+            // AAD esplicita
+            if (!aad.IsEmpty)
+                aead.ProcessAadBytes(aad.ToArray(), 0, aad.Length);
 
-            byte[] outBuf = new byte[plaintext.Length + 16];
-            int len = aead.ProcessBytes(plaintext.ToArray(), 
-                                        0, 
-                                        plaintext.Length, 
-                                        outBuf, 
-                                        0);
-            _ = aead.DoFinal(outBuf, len);
+            // out = CT||TAG
+            var outBuf = new byte[plaintext.Length + 16];
+            int outLen = aead.ProcessBytes(plaintext.ToArray(), 0, plaintext.Length, outBuf, 0);
+            outLen += aead.DoFinal(outBuf, outLen); // aggiunge 16B di tag
 
+            // split verso i buffer del chiamante
             outBuf.AsSpan(0, plaintext.Length).CopyTo(ciphertext);
             outBuf.AsSpan(plaintext.Length, 16).CopyTo(tag);
+
             CryptographicOperations.ZeroMemory(outBuf);
         }
 
-        public bool Decrypt(ReadOnlySpan<byte> key, 
-                            ReadOnlySpan<byte> nonce, 
-                            ReadOnlySpan<byte> aad,
-                            ReadOnlySpan<byte> ciphertext, 
-                            ReadOnlySpan<byte> tag, 
-                            Span<byte> plaintext)
+        public bool Decrypt(ReadOnlySpan<byte> key, ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> aad,
+                            ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> tag, Span<byte> plaintext)
         {
-            if (key.Length != 32 || nonce.Length != 12 || tag.Length != 16) 
+            if (key.Length != 32 || nonce.Length != 12 || tag.Length != 16)
+            {
+                this.Logger?.LogDebug("Bad key/nonce/tag size: {keyLen}/{nonceLen}/{tagLen}",
+                                      key.Length, nonce.Length, tag.Length);
                 return false;
+            }
 
-            if (plaintext.Length != ciphertext.Length) 
+            if (plaintext.Length != ciphertext.Length)
+            {
+                this.Logger?.LogDebug("plainText size != cipherText size: {ptLen}/{ctLen}",
+                                      plaintext.Length, ciphertext.Length);
                 return false;
+            }
 
-            KeyParameter keyParameter;
-            AeadParameters param;
-            ChaCha20Poly1305 aead = new ChaCha20Poly1305();
+            var aead = new ChaCha20Poly1305();
+            aead.Init(false, new ParametersWithIV(new KeyParameter(key.ToArray()), nonce.ToArray()));
 
-            keyParameter = new (key.ToArray());
-            param = new (keyParameter, 128, nonce.ToArray(), aad.ToArray());
-            aead.Init(false, param);
+            if (!aad.IsEmpty)
+                aead.ProcessAadBytes(aad.ToArray(), 0, aad.Length);
 
-            var inBuf = new byte[ciphertext.Length + tag.Length];
-            ciphertext.CopyTo(inBuf.AsSpan(0, ciphertext.Length));
-            tag.CopyTo(inBuf.AsSpan(ciphertext.Length, tag.Length));
-
+            // In decrypt, la cipher si aspetta CT seguito dal TAG (come input).
+            // Possiamo passare CT e poi TAG come due ProcessBytes consecutivi.
+            var ptTmp = new byte[plaintext.Length];
             try
             {
-                int len = aead.ProcessBytes(inBuf, 0, inBuf.Length, plaintext.ToArray(), 0);
-                byte[] plainTextTemp = new byte[plaintext.Length];
-                len += aead.DoFinal(plainTextTemp, len);
+                int outLen = aead.ProcessBytes(ciphertext.ToArray(), 0, ciphertext.Length, ptTmp, 0);
+                outLen += aead.ProcessBytes(tag.ToArray(), 0, tag.Length, ptTmp, outLen); // tipicamente 0
+                outLen += aead.DoFinal(ptTmp, outLen); // verifica MAC; lancia se invalido
 
-                if (len != plainTextTemp.Length)
-                {
-                    this.Logger?.LogDebug("AEAD processed len mismatch");
-                    return false;
-                }
-
-                plainTextTemp.AsSpan().CopyTo(plaintext);
-                CryptographicOperations.ZeroMemory(plainTextTemp);
+                // copia nei buffer del chiamante
+                ptTmp.AsSpan(0, plaintext.Length).CopyTo(plaintext);
                 return true;
             }
-            catch (InvalidCipherTextException) 
-            { 
-                this.Logger?.LogDebug("Error in ChaCha20-Poly1305 decryption: bad tag or data");
-                return false; 
+            catch (InvalidCipherTextException)
+            {
+                this.Logger?.LogDebug("Decryption failed: invalid tag/AAD/nonce/ct");
+                return false; // tag/AAD/nonce/ct non validi
             }
-            finally 
-            { 
-                CryptographicOperations.ZeroMemory(inBuf); 
+            finally
+            {
+                CryptographicOperations.ZeroMemory(ptTmp);
             }
         }
 

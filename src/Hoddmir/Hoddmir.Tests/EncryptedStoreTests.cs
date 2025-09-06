@@ -135,10 +135,13 @@ namespace Hoddmir.Tests
         }
 
         [TestMethod]
-        public async Task PutOverwriteLastWinsAfterCompact()
+        [DynamicData(nameof(GetTestsForAEADProviders), DynamicDataSourceType.Method)]
+        public async Task PutOverwriteLastWinsAfterCompact(IAEADProvider aeadProvider)
         {
             MemoryAppendOnlyStoreProvider memoryStore = new ();
-            EncryptedEntryStore store = await CreateStoreAsync(memoryStore);
+            EncryptedEntryStore store = await CreateStoreAsync(memoryStore, aeadProvider);
+
+            Trace.WriteLine($"Testing with AEAD provider: {aeadProvider}");
 
             string id = "k";
             await store.PutAsync(id, Encoding.UTF8.GetBytes("v1"));
