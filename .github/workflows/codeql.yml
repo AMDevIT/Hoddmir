@@ -1,4 +1,4 @@
-name: "CodeQL Advanced"
+name: "CodeQL Advanced (dotNET 8)"
 
 on: workflow_dispatch
 
@@ -17,13 +17,12 @@ jobs:
       matrix:
         include:
         - language: csharp
-          build-mode: manual   # <--- da none a manual
+          build-mode: manual
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # Installa .NET 8 SDK
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
@@ -35,12 +34,23 @@ jobs:
         languages: ${{ matrix.language }}
         build-mode: ${{ matrix.build-mode }}
 
-    # Build manuale del progetto solo per net8.0
-    - if: matrix.build-mode == 'manual'
+    
+    - name: Build (manual, net8.0)
+      if: matrix.build-mode == 'manual'
       shell: bash
       run: |
-        dotnet restore
-        dotnet build --configuration Release -f net8.0
+        set -e
+        TARGET=$(git ls-files '*.sln' | head -n 1)
+        if [ -z "$TARGET" ]; then
+          TARGET=$(git ls-files '*.csproj' | head -n 1)
+        fi
+        if [ -z "$TARGET" ]; then
+          echo "No .sln o .csproj found in the repository"; exit 1
+        fi
+        echo "Building: $TARGET"
+        dotnet restore "$TARGET"
+        dotnet build "$TARGET" -c Release -f net8.0
+    
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
