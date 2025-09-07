@@ -36,7 +36,7 @@ jobs:
         build-mode: ${{ matrix.build-mode }}
 
     
-    - name: Build (manual, net8.0)
+    - name: Build (manual, net9.0)
       if: matrix.build-mode == 'manual'
       shell: bash
       run: |
