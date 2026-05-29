@@ -1,47 +1,63 @@
-﻿namespace Hoddmir.Storage.Providers
+namespace Hoddmir.Storage.Providers;
+
+/// <summary>
+/// In-memory append-only store. Thread-safe via <see cref="SemaphoreSlim"/>.
+/// Primarily intended for testing and in-process vaults.
+/// </summary>
+public sealed class MemoryAppendOnlyStoreProvider : IAppendOnlyStoreProvider, IAtomicReplace
 {
-    public sealed class MemoryAppendOnlyStoreProvider 
-        : IAppendOnlyStoreProvider, IAtomicReplace
+    private byte[] _buf = Array.Empty<byte>();
+    private long   _len;
+    private readonly SemaphoreSlim _sem = new(1, 1);
+
+    public async Task<long> GetLengthAsync(CancellationToken ct = default)
     {
-        private byte[] _buf = Array.Empty<byte>();
-        private long _len;
+        await _sem.WaitAsync(ct).ConfigureAwait(false);
+        try   { return _len; }
+        finally { _sem.Release(); }
+    }
 
-        public Task<long> GetLengthAsync(CancellationToken ct = default)
-            => Task.FromResult(_len);
-
-        public Task<int> ReadAtAsync(long offset, Memory<byte> buffer, CancellationToken ct = default)
+    public async Task<int> ReadAtAsync(long offset, Memory<byte> buffer, CancellationToken ct = default)
+    {
+        await _sem.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            int toRead = (int)Math.Min(buffer.Length, Math.Max(0, _len - offset));
-            if (toRead <= 0) return Task.FromResult(0);
+            int toRead = (int)Math.Min(buffer.Length, Math.Max(0L, _len - offset));
+            if (toRead <= 0) return 0;
             new ReadOnlySpan<byte>(_buf, (int)offset, toRead).CopyTo(buffer.Span);
-            return Task.FromResult(toRead);
+            return toRead;
         }
+        finally { _sem.Release(); }
+    }
 
-        public Task AppendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default)
+    public async Task AppendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default)
+    {
+        await _sem.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            var need = (int)(_len + data.Length);
+            int need = (int)(_len + data.Length);
             if (_buf.Length < need)
                 Array.Resize(ref _buf, Math.Max(need, _buf.Length == 0 ? 1024 : _buf.Length * 2));
-
             data.Span.CopyTo(new Span<byte>(_buf, (int)_len, data.Length));
             _len += data.Length;
-            return Task.CompletedTask;
         }
+        finally { _sem.Release(); }
+    }
 
-        public Task FlushAsync(bool hard = false, CancellationToken ct = default)
-            => Task.CompletedTask;
+    public Task FlushAsync(bool hard = false, CancellationToken ct = default) => Task.CompletedTask;
 
-        // *** punto critico ***
-        public async Task ReplaceWithAsync(Func<Stream, Task> buildNew, CancellationToken ct = default)
+    public async Task ReplaceWithAsync(Func<Stream, Task> buildNew, CancellationToken ct = default)
+    {
+        using var ms = new MemoryStream(capacity: (int)_len);
+        await buildNew(ms).ConfigureAwait(false);
+        var newBytes = ms.ToArray();
+
+        await _sem.WaitAsync(ct).ConfigureAwait(false);
+        try
         {
-            // Costruisci il nuovo contenuto in un MemoryStream temporaneo
-            using var ms = new MemoryStream(capacity: _buf.Length);
-            await buildNew(ms).ConfigureAwait(false);
-            var newBytes = ms.ToArray();
-
-            // SOSTITUISCI atomico: rimpiazza buffer e lunghezza
             _buf = newBytes;
             _len = newBytes.LongLength;
         }
+        finally { _sem.Release(); }
     }
 }

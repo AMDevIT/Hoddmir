@@ -1,29 +1,54 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 
-namespace Hoddmir.Core.Memory
+namespace Hoddmir.Memory;
+
+/// <summary>
+/// Holds a fixed-size byte buffer in a GC-pinned managed array so it is never
+/// moved or copied by the runtime, and is zeroed on disposal.
+/// Prefer this over stackalloc for buffers that must outlive a single method frame
+/// or be held by a long-lived object (e.g. DEK, nonce prefix).
+/// </summary>
+public sealed class SensitiveBytes : IDisposable
 {
-    public sealed class SensitiveBytes : SafeHandle
+    // GC.AllocateArray with pinned:true allocates in the Pinned Object Heap (POH).
+    // The array stays at a fixed address for its entire lifetime — no Marshal, no unsafe.
+    private byte[]? _buffer;
+    private bool _disposed;
+
+    public int Length { get; }
+
+    public SensitiveBytes(int length)
     {
-        public int Length { get; }
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(length);
+        Length  = length;
+        _buffer = GC.AllocateArray<byte>(length, pinned: true);
+    }
 
-        public SensitiveBytes(int len) 
-            : base(IntPtr.Zero, ownsHandle: true)
-        { 
-            this.Length = len; SetHandle(Marshal.AllocHGlobal(len)); 
-        }
+    /// <summary>Returns a span over the pinned buffer. Valid only while this instance is alive.</summary>
+    public Span<byte> AsSpan()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _buffer.AsSpan();
+    }
 
-        public Span<byte> AsSpan()
+    /// <summary>Copies the buffer contents to a new heap array. The copy is NOT zeroed on GC — caller is responsible.</summary>
+    public byte[] ToManagedCopy()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var copy = new byte[Length];
+        _buffer.AsSpan().CopyTo(copy);
+        return copy;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        if (_buffer is not null)
         {
-            unsafe
-            {
-                Span<byte> ptr = new((void*)handle, Length);
-                return ptr;
-            }
+            CryptographicOperations.ZeroMemory(_buffer.AsSpan());
+            _buffer = null;
         }
-        public byte[] ToManagedCopy() { var tmp = new byte[Length]; AsSpan().CopyTo(tmp); return tmp; }
-        protected override bool ReleaseHandle()
-        { CryptographicOperations.ZeroMemory(AsSpan()); Marshal.FreeHGlobal(handle); return true; }
-        public override bool IsInvalid => handle == IntPtr.Zero;
     }
 }
