@@ -1,22 +1,17 @@
-﻿namespace Hoddmir.Core.Keys
+namespace Hoddmir.Core.Keys;
+
+/// <summary>Derives a key-encryption key (KEK) from a password using Argon2id.</summary>
+public interface IArgonKeyProvider
 {
-    public interface IArgonKeyProvider
-    {
-        #region Consts
+    /// <summary>Default output key length in bytes.</summary>
+    const int DefaultKeyLength = 32;
 
-        public const int DefaultArgonKeyLength = 32;
-
-        #endregion
-
-        #region Methods
-
-        byte[] DeriveKekArgon2id(byte[] password,
-                                 byte[] salt,
-                                 int memKiB,
-                                 int iters,
-                                 int parallelism,
-                                 int keyLength = DefaultArgonKeyLength);
-
-        #endregion
-    }
+    /// <summary>
+    /// Derives a KEK from <paramref name="password"/> and <paramref name="salt"/>
+    /// using the supplied <paramref name="parameters"/>.
+    /// </summary>
+    byte[] DeriveKey(ReadOnlySpan<byte> password,
+                     ReadOnlySpan<byte> salt,
+                     in Argon2idParams parameters,
+                     int keyLength = DefaultKeyLength);
 }

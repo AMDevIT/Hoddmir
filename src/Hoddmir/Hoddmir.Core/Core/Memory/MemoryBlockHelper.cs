@@ -1,29 +1,14 @@
-﻿using System.Security.Cryptography;
+using System.Security.Cryptography;
 
-namespace Hoddmir.Core.Memory
+namespace Hoddmir.Memory;
+
+internal static class MemoryBlockHelper
 {
-    internal static class MemoryBlockHelper
+    /// <summary>Returns a new array filled with cryptographically strong random bytes.</summary>
+    public static byte[] RandomBytes(int count)
     {
-        #region Methods
-
-        // Fill a byte array with cryptographically strong random bytes.
-        public static byte[] RandomBytes(int n)
-        {
-            byte[] buffer = new byte[n];
-
-            RandomNumberGenerator.Fill(buffer);
-            return buffer;
-        }
-
-        public static Span<byte> GetSpanFromHandle(IntPtr handle, int length)
-        {
-            unsafe
-            {
-                Span<byte> span = new((void*)handle, length);
-                return span;
-            }
-        }
-
-        #endregion
+        var buffer = new byte[count];
+        RandomNumberGenerator.Fill(buffer);
+        return buffer;
     }
 }

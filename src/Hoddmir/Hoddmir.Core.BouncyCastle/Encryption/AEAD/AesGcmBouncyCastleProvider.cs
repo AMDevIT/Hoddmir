@@ -1,6 +1,7 @@
 using Hoddmir.Core.Encryption.AEAD;
 using Microsoft.Extensions.Logging;
 using Org.BouncyCastle.Crypto;
+using Org.BouncyCastle.Crypto.Engines;
 using Org.BouncyCastle.Crypto.Modes;
 using Org.BouncyCastle.Crypto.Parameters;
 using CryptographicOperations = System.Security.Cryptography.CryptographicOperations;
@@ -8,14 +9,14 @@ using CryptographicOperations = System.Security.Cryptography.CryptographicOperat
 namespace Hoddmir.BouncyCastle.Encryption.AEAD;
 
 /// <summary>
-/// ChaCha20-Poly1305 AEAD provider backed by BouncyCastle.
-/// Available on all .NET target frameworks including net8.0, iOS, and Android.
+/// AES-256-GCM AEAD provider backed by BouncyCastle.
+/// Used automatically as a fallback for <see cref="AesGcmProvider"/> on runtimes
+/// that do not support .NET's native AesGcm (i.e. &lt; .NET 9).
+/// Can also be used directly when explicit BouncyCastle behaviour is desired.
 /// </summary>
-public sealed class ChaCha20Poly1305Provider : IAEADProvider
+public sealed class AesGcmBouncyCastleProvider : IAEADProvider
 {
-    public static readonly AeadAlgorithmId AlgorithmId = AeadAlgorithmId.ChaCha20Poly1305;
-
-    private const string ProviderName = "ChaCha20-Poly1305";
+    private const string ProviderName = "AES-GCM (BouncyCastle)";
     private const int KeySize   = 32;
     private const int NonceSize = 12;
     private const int TagSize   = 16;
@@ -27,37 +28,28 @@ public sealed class ChaCha20Poly1305Provider : IAEADProvider
     public int NonceSizeBytes  => NonceSize;
     public int TagSizeBytes    => TagSize;
 
-    public ChaCha20Poly1305Provider(ILogger? logger = null) => _logger = logger;
+    public AesGcmBouncyCastleProvider(ILogger? logger = null) => _logger = logger;
 
     public void Encrypt(ReadOnlySpan<byte> key, ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> aad,
                         ReadOnlySpan<byte> plaintext, Span<byte> ciphertext, Span<byte> tag)
     {
         if (key.Length != KeySize || nonce.Length != NonceSize || tag.Length != TagSize)
-        {
-            _logger?.LogDebug("ChaCha20-Poly1305 Encrypt: bad sizes key={K} nonce={N} tag={T}",
-                              key.Length, nonce.Length, tag.Length);
             throw new ArgumentException("Invalid key, nonce, or tag length.");
-        }
         if (ciphertext.Length != plaintext.Length)
-        {
-            _logger?.LogDebug("ChaCha20-Poly1305 Encrypt: ciphertext length {CT} != plaintext length {PT}",
-                              ciphertext.Length, plaintext.Length);
             throw new ArgumentException("Ciphertext span must equal plaintext length.");
-        }
 
-        var aead = new ChaCha20Poly1305();
-        aead.Init(true, new ParametersWithIV(new KeyParameter(key.ToArray()), nonce.ToArray()));
+        var gcm = new GcmBlockCipher(new AesEngine());
+        var parameters = new AeadParameters(new KeyParameter(key.ToArray()), TagSize * 8, nonce.ToArray(),
+                                            aad.IsEmpty ? null : aad.ToArray());
+        gcm.Init(true, parameters);
 
-        if (!aad.IsEmpty)
-            aead.ProcessAadBytes(aad.ToArray(), 0, aad.Length);
+        var outBuf = new byte[gcm.GetOutputSize(plaintext.Length)];
+        int outLen = gcm.ProcessBytes(plaintext.ToArray(), 0, plaintext.Length, outBuf, 0);
+        outLen += gcm.DoFinal(outBuf, outLen);
 
-        var outBuf = new byte[plaintext.Length + TagSize];
-        int outLen = aead.ProcessBytes(plaintext.ToArray(), 0, plaintext.Length, outBuf, 0);
-        outLen += aead.DoFinal(outBuf, outLen);
-
+        // BouncyCastle appends tag after ciphertext
         outBuf.AsSpan(0, plaintext.Length).CopyTo(ciphertext);
         outBuf.AsSpan(plaintext.Length, TagSize).CopyTo(tag);
-
         CryptographicOperations.ZeroMemory(outBuf);
     }
 
@@ -65,42 +57,37 @@ public sealed class ChaCha20Poly1305Provider : IAEADProvider
                         ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> tag, Span<byte> plaintext)
     {
         if (key.Length != KeySize || nonce.Length != NonceSize || tag.Length != TagSize)
-        {
-            _logger?.LogDebug("ChaCha20-Poly1305 Decrypt: bad sizes key={K} nonce={N} tag={T}",
-                              key.Length, nonce.Length, tag.Length);
             return false;
-        }
         if (plaintext.Length != ciphertext.Length)
-        {
-            _logger?.LogDebug("ChaCha20-Poly1305 Decrypt: plaintext length {PT} != ciphertext length {CT}",
-                              plaintext.Length, ciphertext.Length);
             return false;
-        }
 
-        var aead = new ChaCha20Poly1305();
-        aead.Init(false, new ParametersWithIV(new KeyParameter(key.ToArray()), nonce.ToArray()));
+        var gcm = new GcmBlockCipher(new AesEngine());
+        var parameters = new AeadParameters(new KeyParameter(key.ToArray()), TagSize * 8, nonce.ToArray(),
+                                            aad.IsEmpty ? null : aad.ToArray());
+        gcm.Init(false, parameters);
 
-        if (!aad.IsEmpty)
-            aead.ProcessAadBytes(aad.ToArray(), 0, aad.Length);
+        // BouncyCastle expects ciphertext || tag as a single buffer for decryption
+        var inputBuf = new byte[ciphertext.Length + TagSize];
+        ciphertext.CopyTo(inputBuf.AsSpan(0, ciphertext.Length));
+        tag.CopyTo(inputBuf.AsSpan(ciphertext.Length, TagSize));
 
-        var ptTmp = new byte[plaintext.Length];
+        var ptTmp = new byte[gcm.GetOutputSize(inputBuf.Length)];
         try
         {
-            int outLen = aead.ProcessBytes(ciphertext.ToArray(), 0, ciphertext.Length, ptTmp, 0);
-            outLen += aead.ProcessBytes(tag.ToArray(), 0, tag.Length, ptTmp, outLen);
-            outLen += aead.DoFinal(ptTmp, outLen);
-
+            int outLen = gcm.ProcessBytes(inputBuf, 0, inputBuf.Length, ptTmp, 0);
+            outLen += gcm.DoFinal(ptTmp, outLen);
             ptTmp.AsSpan(0, plaintext.Length).CopyTo(plaintext);
             return true;
         }
         catch (InvalidCipherTextException)
         {
-            _logger?.LogDebug("ChaCha20-Poly1305 Decrypt: authentication failed.");
+            _logger?.LogDebug("AES-GCM (BouncyCastle) Decrypt: authentication failed.");
             return false;
         }
         finally
         {
             CryptographicOperations.ZeroMemory(ptTmp);
+            CryptographicOperations.ZeroMemory(inputBuf);
         }
     }
 
