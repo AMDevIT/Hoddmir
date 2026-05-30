@@ -57,8 +57,8 @@ Each blob is encrypted with a 256-bit **Data Encryption Key (DEK)** using one of
 
 | Algorithm | Notes |
 |---|---|
-| **ChaCha20-Poly1305** *(recommended)* | Fast, no timing side-channels, available on all targets including .NET 8 via the `Hoddmir.BouncyCastle` package. |
-| **AES-256-GCM** | Requires .NET 9+ or the `Hoddmir.BouncyCastle` package for .NET 8 fallback. |
+| **ChaCha20-Poly1305** *(recommended)* | Fast, no timing side-channels, available on all targets. |
+| **AES-256-GCM** | Requires .NET 9+. |
 | **AES-256-CTR + HMAC-SHA-256** | Encrypt-then-MAC construction. Subkeys derived via HKDF-SHA-256 (RFC 5869). No hardware dependency. |
 
 All three algorithms are verified against published test vectors: RFC 8439 (ChaCha20-Poly1305), NIST SP 800-38D (AES-GCM), and RFC 5869 (HKDF-SHA-256).
@@ -88,7 +88,7 @@ Sensitive material (DEK, nonce prefix, derived subkeys) is held in GC-pinned man
 | Package | Description |
 |---|---|
 | `Hoddmir` | Core library. AES-GCM (.NET 9+), AES-CTR+HMAC (all targets), `EncryptedEntryStore`. |
-| `Hoddmir.BouncyCastle` | Optional add-on. ChaCha20-Poly1305 and AES-GCM on .NET 8 via BouncyCastle. Auto-registers at module load — just reference the package. |
+| `Hoddmir.BouncyCastle` | Optional add-on. ChaCha20-Poly1305. |
 
 ---
 
@@ -98,7 +98,7 @@ Sensitive material (DEK, nonce prefix, derived subkeys) is held in GC-pinned man
 
 ```bash
 dotnet add package Hoddmir
-# Recommended: adds ChaCha20-Poly1305 and AES-GCM on .NET 8
+# Recommended: adds ChaCha20-Poly1305
 dotnet add package Hoddmir.BouncyCastle
 ```
 
@@ -243,8 +243,7 @@ byte[]? recovered = provider.TryDecrypt(key, nonce, aad, combined);
 | Target | `ChaCha20Poly1305Provider` | `AesGcmProvider` | `AesCtrHmacSha256Provider` |
 |---|---|---|---|
 | .NET 9+ (all platforms) | ✅ via BouncyCastle | ✅ Native | ✅ |
-| .NET 8 (all platforms) | ✅ via BouncyCastle | ✅ via BouncyCastle¹ | ✅ |
-| iOS / Android (.NET 8+) | ✅ via BouncyCastle | ✅ via BouncyCastle¹ | ✅ |
+| iOS / Android (.NET 9+) | ✅ via BouncyCastle | ✅ via BouncyCastle¹ | ✅ |
 
 ¹ Requires the `Hoddmir.BouncyCastle` package. `AesGcmProvider` throws `PlatformNotSupportedException` at construction if no fallback is registered and the runtime is older than .NET 9.
 
