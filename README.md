@@ -250,6 +250,40 @@ byte[]? recovered = provider.TryDecrypt(key, nonce, aad, combined);
 
 ---
 
+## Security and forensic resistance
+
+### Threat model summary
+
+This is the expected threat model summary:
+
+| Scenario | Resistance | Notes |
+|---|---|---|
+| File at rest, device off | ✅ Very high | AES-256 / ChaCha20-Poly1305 — no known practical attack |
+| File at rest, store closed, device on | ✅ Very high | No DEK in memory — equivalent to VeraCrypt with a dismounted volume |
+| Password brute force | ✅ High | Depends on password strength and Argon2id cost |
+| Forensic file analysis without memory | ✅ High | Strong cryptography; magic number `EES1` is not in common forensic signature databases |
+| Memory forensics, store open | 🟡 Medium | DEK lives in the process during an open session — structural limitation of managed runtimes |
+| Swap / pagefile during active session | 🟡 Medium | OS may page process memory to disk; not controllable from managed code without kernel privileges |
+| Key name confidentiality | 🟡 Partial | Blob values are encrypted; key names are stored in plaintext in the record |
+| Nation-state, device off or store closed | ✅ Very high | No memory to dump — same posture as VeraCrypt with a dismounted volume |
+| Nation-state, store open on a live device | 🔴 Low | DEK is in memory; memory forensics, cold boot, or hypervisor introspection become viable |
+
+> **Disclaimer:** without a formal security audit the threat model above cannot be guaranteed. It is based on the authors' knowledge of common attack vectors and cryptographic best practices.
+
+### Notes
+
+**The cryptography is sound.** ChaCha20-Poly1305 and AES-256-GCM are the same algorithms used by Signal, WhatsApp, and NSA Suite B / CNSA. No practical cryptanalytic attack exists against correctly implemented 256-bit AEAD. All algorithms are verified against published test vectors (RFC 8439, NIST SP 800-38D, RFC 5869).
+
+**Memory forensics is the main exposure.** The DEK is resident in process memory for the duration of an open store session. A memory dump of the process (`ProcDump`, `WinPmem`, OS crash dump) can expose the DEK even with `SensitiveBytes` and `ZeroMemory` in place. This is a structural limitation of .NET managed runtimes — the JIT and GC can materialise intermediate values in registers or on the stack before zeroing occurs. VeraCrypt mitigates this using kernel drivers and non-pageable memory; Hoddmir cannot do this without elevated privileges.
+
+**Key names are plaintext.** An investigator without the password cannot read blob values, but can observe which keys exist, how many records are present, and the write timeline. If key name confidentiality is required, use opaque keys (e.g. an HMAC of the logical name).
+
+**The real attack surface at nation-state level is never the ciphertext.** Keyloggers, compromised devices, supply chain attacks, and coercive access to the password are the practical vectors. No cryptographic library protects against these — Hoddmir included.
+
+**What would raise the bar further.** Two additions would meaningfully improve forensic resistance without changing the public API: encrypting key names (replacing plaintext keys with a deterministic HMAC in the record), and deriving the DEK fresh from the password on each operation rather than keeping it resident in memory. Both come at a performance cost and are not necessary for Hoddmir's primary use case as an application-level blob store.
+
+---
+
 ## File format
 
 Store files are identified by the magic bytes `EES1` and are versioned. The current version is `0x03`.
@@ -293,24 +327,6 @@ public class MyCustomStoreProvider : IAppendOnlyStoreProvider, IAtomicReplace
     public Task       ReplaceWithAsync(Func<Stream, Task> buildNew, CancellationToken ct = default) { ... }
 }
 ```
-
-### Custom AEAD provider
-
-Implement `IAEADProvider` and register it in `AeadProviderRegistry` so it can be used as a fallback for existing algorithm IDs, or add a new `AeadAlgorithmId` value for a new algorithm:
-
-```csharp
-// In your assembly — auto-registers at module load
-internal static class MyProviderInit
-{
-    [ModuleInitializer]
-    internal static void Register()
-    {
-        AeadProviderRegistry.Register(AeadAlgorithmId.AesGcm,
-            () => new MyAesGcmProvider());
-    }
-}
-```
-
 ---
 
 ## Contributing
