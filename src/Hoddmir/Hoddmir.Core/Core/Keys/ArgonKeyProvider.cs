@@ -1,6 +1,6 @@
 using Konscious.Security.Cryptography;
 
-namespace Hoddmir.Keys;
+namespace Hoddmir.Core.Keys;
 
 /// <summary>Default <see cref="IArgonKeyProvider"/> implementation using Konscious.Argon2.</summary>
 public sealed class ArgonKeyProvider : IArgonKeyProvider

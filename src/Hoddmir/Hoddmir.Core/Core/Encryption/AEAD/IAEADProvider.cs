@@ -1,4 +1,4 @@
-namespace Hoddmir.Encryption;
+namespace Hoddmir.Core.Encryption.AEAD;
 
 /// <summary>
 /// Low-level AEAD provider. All spans are caller-allocated; sizes must match the

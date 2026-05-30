@@ -1,4 +1,4 @@
-namespace Hoddmir.Encryption;
+namespace Hoddmir.Core.Encryption.AEAD;
 
 /// <summary>
 /// Stable numeric identifier for each AEAD algorithm persisted in the store header.

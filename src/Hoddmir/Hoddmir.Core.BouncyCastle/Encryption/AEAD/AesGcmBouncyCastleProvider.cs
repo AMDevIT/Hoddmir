@@ -1,4 +1,4 @@
-using Hoddmir.Encryption;
+using Hoddmir.Core.Encryption.AEAD;
 using Microsoft.Extensions.Logging;
 using Org.BouncyCastle.Crypto;
 using Org.BouncyCastle.Crypto.Engines;
@@ -6,7 +6,7 @@ using Org.BouncyCastle.Crypto.Modes;
 using Org.BouncyCastle.Crypto.Parameters;
 using CryptographicOperations = System.Security.Cryptography.CryptographicOperations;
 
-namespace Hoddmir.BouncyCastle.Encryption;
+namespace Hoddmir.BouncyCastle.Encryption.AEAD;
 
 /// <summary>
 /// AES-256-GCM AEAD provider backed by BouncyCastle.

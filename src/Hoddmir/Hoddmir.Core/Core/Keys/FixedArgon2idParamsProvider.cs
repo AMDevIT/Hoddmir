@@ -1,4 +1,4 @@
-namespace Hoddmir.Keys;
+namespace Hoddmir.Core.Keys;
 
 /// <summary>
 /// <see cref="IArgon2idParamsProvider"/> that always returns a pre-configured

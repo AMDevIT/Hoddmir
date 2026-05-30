@@ -1,4 +1,5 @@
-using Hoddmir.Encryption;
+using Hoddmir.BouncyCastle.Encryption.AEAD;
+using Hoddmir.Core.Encryption.AEAD;
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
 using System.Security.Cryptography;
@@ -300,12 +301,12 @@ public class AEADProvidersTests
             "No low-entropy warning expected when an explicit salt is provided.");
     }
 
-
+    private static IEnumerable<object[]> GetProviders()
     {
         IAEADProvider[] providers =
         [
             new AesGcmProvider(tagSizeBytes: 16),
-            new Hoddmir.BouncyCastle.Encryption.ChaCha20Poly1305Provider(),
+            new ChaCha20Poly1305Provider(),
             new AesCtrHmacSha256Provider(),
         ];
         return providers.Select(p => new object[] { p });

@@ -1,8 +1,8 @@
-using Hoddmir.Encryption;
-using Hoddmir.Keys;
+using Hoddmir.BouncyCastle.Encryption.AEAD;
+using Hoddmir.Core.Encryption.AEAD;
+using Hoddmir.Core.Keys;
 using Hoddmir.Storage;
 using Hoddmir.Storage.Providers;
-using Hoddmir.BouncyCastle.Encryption;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Security.Cryptography;
@@ -268,12 +268,11 @@ public sealed class EncryptedStoreTests
         await store.DisposeAsync();
 
         // Reopen with OLD password — must fail
-        await Assert.ThrowsExceptionAsync<Exception>(async () =>
-            await EncryptedEntryStore.Configure()
-                .WithPassword(Password)       // wrong — was rotated away
-                .WithArgon2id(FastArgon)
-                .WithAead(aead)
-                .OpenAsync(ms, ms));
+        await Assert.ThrowsExceptionAsync<CryptographicException>(async () => await EncryptedEntryStore.Configure()
+                                                                                                       .WithPassword(Password)
+                                                                                                       .WithArgon2id(FastArgon)
+                                                                                                       .WithAead(aead)
+                                                                                                       .OpenAsync(ms, ms));
     }
 
     [TestMethod]

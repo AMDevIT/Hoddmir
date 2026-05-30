@@ -1,6 +1,7 @@
-using Hoddmir.Encryption;
 using Hoddmir.BouncyCastle.Encryption;
 using System.Security.Cryptography;
+using Hoddmir.Core.Encryption.AEAD;
+using Hoddmir.BouncyCastle.Encryption.AEAD;
 
 namespace Hoddmir.Tests;
 

@@ -1,12 +1,11 @@
-using Hoddmir.Encryption;
+using Hoddmir.Core.Encryption.AEAD;
 using Microsoft.Extensions.Logging;
 using Org.BouncyCastle.Crypto;
 using Org.BouncyCastle.Crypto.Modes;
 using Org.BouncyCastle.Crypto.Parameters;
-using System.Runtime.CompilerServices;
 using CryptographicOperations = System.Security.Cryptography.CryptographicOperations;
 
-namespace Hoddmir.BouncyCastle.Encryption;
+namespace Hoddmir.BouncyCastle.Encryption.AEAD;
 
 /// <summary>
 /// ChaCha20-Poly1305 AEAD provider backed by BouncyCastle.
@@ -107,25 +106,4 @@ public sealed class ChaCha20Poly1305Provider : IAEADProvider
 
     public override string ToString() =>
         $"Provider: {Name}, Key: {KeySizeBytes * 8} bits, Nonce: {NonceSizeBytes} B, Tag: {TagSizeBytes} B";
-}
-
-/// <summary>
-/// Registers BouncyCastle-backed providers into <see cref="AeadProviderRegistry"/>
-/// at module load time, so that e.g. <see cref="AesGcmProvider"/> can fall back to
-/// BouncyCastle on .NET 8 automatically.
-/// </summary>
-internal static class BouncyCastleModuleInit
-{
-    [ModuleInitializer]
-    internal static void Register()
-    {
-        // AES-GCM via BouncyCastle — available on all target frameworks.
-        AeadProviderRegistry.Register(AeadAlgorithmId.AesGcm,
-            () => new Hoddmir.BouncyCastle.Encryption.AesGcmBouncyCastleProvider());
-
-        // ChaCha20-Poly1305 via BouncyCastle — not strictly needed on .NET 9+
-        // where the managed impl exists, but registered for completeness.
-        AeadProviderRegistry.Register(AeadAlgorithmId.ChaCha20Poly1305,
-            () => new ChaCha20Poly1305Provider());
-    }
 }

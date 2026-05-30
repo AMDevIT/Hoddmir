@@ -2,7 +2,7 @@ using Microsoft.Extensions.Logging;
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 
-namespace Hoddmir.Encryption;
+namespace Hoddmir.Core.Encryption.AEAD;
 
 /// <summary>
 /// AES-256-CTR + HMAC-SHA-256 (Encrypt-then-MAC) AEAD provider.
@@ -31,8 +31,11 @@ namespace Hoddmir.Encryption;
 /// The tag is verified <em>before</em> decryption (Encrypt-then-MAC).
 /// </para>
 /// </remarks>
-public sealed class AesCtrHmacSha256Provider : IAEADProvider
+public sealed class AesCtrHmacSha256Provider 
+    : IAEADProvider
 {
+    #region Fields
+
     public static readonly AeadAlgorithmId AlgorithmId = AeadAlgorithmId.AesCtrHmacSha256;
 
     private const string ProviderName   = "AES-CTR+HMAC-SHA256 (EtM)";
@@ -45,13 +48,21 @@ public sealed class AesCtrHmacSha256Provider : IAEADProvider
     // in the IKM are identical we consider it suspiciously low-entropy.
     private const double LowEntropyThreshold = 0.5;
 
-    private readonly byte[]   _hkdfSalt; // all-zeros when not supplied by caller
-    private readonly ILogger? _logger;
+    private readonly byte[]   hkdfSalt; // all-zeros when not supplied by caller
+    private readonly ILogger? logger;
+
+    #endregion
+
+    #region Properties
 
     public string Name         => ProviderName;
     public int KeySizeBytes    => KeySize;
     public int NonceSizeBytes  => NonceSize; // caller-supplied; block counter occupies the last 4 bytes internally
     public int TagSizeBytes    => TagSize;   // MAC truncated to 16 bytes
+
+    #endregion
+
+    #region .ctor
 
     /// <param name="hkdfSalt">
     /// Optional HKDF salt (recommended ≥ 32 random bytes).
@@ -62,13 +73,17 @@ public sealed class AesCtrHmacSha256Provider : IAEADProvider
     public AesCtrHmacSha256Provider(byte[]? hkdfSalt = null, ILogger? logger = null)
     {
         if (hkdfSalt is not null && hkdfSalt.Length < MinSaltBytes)
-            throw new ArgumentException(
-                $"HKDF salt must be at least {MinSaltBytes} bytes when provided. " +
-                $"Received {hkdfSalt.Length} bytes.", nameof(hkdfSalt));
+            throw new ArgumentException($"HKDF salt must be at least {MinSaltBytes} bytes when provided. " +
+                                        $"Received {hkdfSalt.Length} bytes.", 
+                                        nameof(hkdfSalt));
 
-        _hkdfSalt = hkdfSalt ?? new byte[32]; // zero salt = RFC 5869 default for uniform IKM
-        _logger   = logger;
+        this.hkdfSalt = hkdfSalt ?? new byte[32]; // zero salt = RFC 5869 default for uniform IKM
+        this.logger   = logger;
     }
+
+    #endregion
+
+    #region Methods
 
     public void Encrypt(ReadOnlySpan<byte> key,
                         ReadOnlySpan<byte> nonce,
@@ -79,6 +94,7 @@ public sealed class AesCtrHmacSha256Provider : IAEADProvider
     {
         if (key.Length != KeySize || nonce.Length != NonceSize || tag.Length != TagSize)
             throw new ArgumentException("Invalid key, nonce, or tag length.");
+
         if (ciphertext.Length != plaintext.Length)
             throw new ArgumentException("Ciphertext span must equal plaintext length.");
 
@@ -104,6 +120,7 @@ public sealed class AesCtrHmacSha256Provider : IAEADProvider
     {
         if (key.Length != KeySize || nonce.Length != NonceSize || tag.Length != TagSize)
             return false;
+
         if (plaintext.Length != ciphertext.Length)
             return false;
 
@@ -123,7 +140,7 @@ public sealed class AesCtrHmacSha256Provider : IAEADProvider
         {
             CryptographicOperations.ZeroMemory(kenc);
             CryptographicOperations.ZeroMemory(kmac);
-            _logger?.LogDebug("AES-CTR+HMAC decryption failed: MAC mismatch.");
+            logger?.LogDebug("AES-CTR+HMAC decryption failed: MAC mismatch.");
             return false;
         }
 
@@ -144,7 +161,7 @@ public sealed class AesCtrHmacSha256Provider : IAEADProvider
     private void DeriveSubkeys(ReadOnlySpan<byte> ikm, Span<byte> kenc, Span<byte> kmac)
     {
         Span<byte> prk = stackalloc byte[32];
-        HKDF.Extract(HashAlgorithmName.SHA256, ikm, _hkdfSalt, prk);
+        HKDF.Extract(HashAlgorithmName.SHA256, ikm, hkdfSalt, prk);
 
         Span<byte> okm = stackalloc byte[64];
         HKDF.Expand(HashAlgorithmName.SHA256, prk, okm, "AES-CTR-HKDF"u8);
@@ -165,7 +182,7 @@ public sealed class AesCtrHmacSha256Provider : IAEADProvider
     // without producing false positives on legitimate uniform keys.
     private void WarnIfLowEntropyIkm(ReadOnlySpan<byte> ikm)
     {
-        if (_logger is null) return;
+        if (logger is null) return;
         if (!IsSaltAllZeros()) return; // caller supplied a real salt — no concern
 
         // Count the most-frequent byte value.
@@ -175,7 +192,7 @@ public sealed class AesCtrHmacSha256Provider : IAEADProvider
         foreach (int f in freq) if (f > maxFreq) maxFreq = f;
 
         if (maxFreq > ikm.Length * LowEntropyThreshold)
-            _logger.LogWarning(
+            logger.LogWarning(
                 "[{Provider}] The IKM appears to have low entropy " +
                 "({MaxFreq}/{Total} bytes share the same value) and no explicit HKDF salt " +
                 "was provided. If the IKM is a password or other low-entropy material, " +
@@ -186,7 +203,7 @@ public sealed class AesCtrHmacSha256Provider : IAEADProvider
 
     private bool IsSaltAllZeros()
     {
-        foreach (byte b in _hkdfSalt)
+        foreach (byte b in hkdfSalt)
             if (b != 0) return false;
         return true;
     }
@@ -246,6 +263,11 @@ public sealed class AesCtrHmacSha256Provider : IAEADProvider
         CryptographicOperations.ZeroMemory(keystreamBuf);
     }
 
-    public override string ToString() =>
-        $"Provider: {Name}, Key: {KeySizeBytes * 8} bits, Nonce: {NonceSizeBytes} B, Tag: {TagSizeBytes} B";
+    public override string ToString()
+    {
+        return $"Provider: {Name}, Key: {KeySizeBytes * 8} bits, Nonce: {NonceSizeBytes} B, " +
+               $"Tag: {TagSizeBytes} B";
+    }
+
+    #endregion
 }

@@ -1,4 +1,4 @@
-namespace Hoddmir.Keys;
+namespace Hoddmir.Core.Keys;
 
 /// <summary>
 /// Provides Argon2id parameters, either fixed or calibrated to a target duration.

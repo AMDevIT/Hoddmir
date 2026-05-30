@@ -1,4 +1,4 @@
-namespace Hoddmir.Keys;
+namespace Hoddmir.Core.Keys;
 
 /// <summary>Derives a key-encryption key (KEK) from a password using Argon2id.</summary>
 public interface IArgonKeyProvider

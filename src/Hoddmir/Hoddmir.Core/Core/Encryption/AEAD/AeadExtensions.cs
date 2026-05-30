@@ -1,6 +1,6 @@
 using System.Security.Cryptography;
 
-namespace Hoddmir.Encryption;
+namespace Hoddmir.Core.Encryption.AEAD;
 
 /// <summary>
 /// High-level helpers built on top of <see cref="IAEADProvider"/>.

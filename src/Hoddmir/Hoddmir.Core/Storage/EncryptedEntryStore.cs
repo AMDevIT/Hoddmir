@@ -1,4 +1,5 @@
-using Hoddmir.Encryption;
+using Hoddmir.Core.Encryption.AEAD;
+using Hoddmir.Core.Keys;
 using Hoddmir.Keys;
 using Hoddmir.Memory;
 using Microsoft.Extensions.Logging;
@@ -46,23 +47,23 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
 {
     #region Format constants
 
-    private const uint  MagicNumber          = 0x31455345; // "EES1"
-    private const byte  Version              = 0x03;        // 0x02→0x03: AeadId added to fixed header
-    private const int   FixedHeaderSize      = 4 + 1 + 1 + 1 + 4; // MAGIC+VER+KeyMode+AeadId+HeaderLen
-    private const int   GCMNonceLen          = 12;
-    private const int   GCMTagLen            = 16;
-    private const int   NoncePrefixLen       = 8;
-    private const int   RecordFixedPrefixLen = 1 + 8 + 4 + 4; // Op+Seq+KeyLen+CtLen
-    private const int   DefaultMemBufDim     = 512;
-    private const int   DefaultPbkdf2Iters   = 600_000;
+    private const uint MagicNumber = 0x31455345; // "EES1"
+    private const byte Version = 0x03;        // 0x02→0x03: AeadId added to fixed header
+    private const int FixedHeaderSize = 4 + 1 + 1 + 1 + 4; // MAGIC+VER+KeyMode+AeadId+HeaderLen
+    private const int GCMNonceLen = 12;
+    private const int GCMTagLen = 16;
+    private const int NoncePrefixLen = 8;
+    private const int RecordFixedPrefixLen = 1 + 8 + 4 + 4; // Op+Seq+KeyLen+CtLen
+    private const int DefaultMemBufDim = 512;
+    private const int DefaultPbkdf2Iters = 600_000;
 
     #endregion
 
     #region Fields
 
     private readonly IAppendOnlyStoreProvider _store;
-    private readonly IAtomicReplace           _replacer;
-    private readonly IAEADProvider            _aead;
+    private readonly IAtomicReplace _replacer;
+    private readonly IAEADProvider _aead;
     // Not readonly: RotateDekAsync replaces these in-place after a successful key rotation.
     private SensitiveBytes _dek;
     private SensitiveBytes _noncePrefix;
@@ -85,13 +86,13 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
                                 long nextSeq,
                                 ILogger? logger)
     {
-        _store       = store;
-        _replacer    = replacer;
-        _aead        = aead;
-        _dek         = new SensitiveBytes(32);
+        _store = store;
+        _replacer = replacer;
+        _aead = aead;
+        _dek = new SensitiveBytes(32);
         _noncePrefix = new SensitiveBytes(NoncePrefixLen);
-        _logger      = logger;
-        _nextSeq     = nextSeq;
+        _logger = logger;
+        _nextSeq = nextSeq;
 
         dek.AsSpan().CopyTo(_dek.AsSpan());
         noncePrefix.AsSpan().CopyTo(_noncePrefix.AsSpan());
@@ -110,33 +111,33 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     /// <summary>Fluent builder for <see cref="EncryptedEntryStore"/>.</summary>
     public sealed class StoreBuilder
     {
-        private byte[]?                  _password;
-        private KeyProtectionMode        _mode           = KeyProtectionMode.PasswordArgon2id;
-        private IAEADProvider?           _aead;
+        private byte[]? _password;
+        private KeyProtectionMode _mode = KeyProtectionMode.PasswordArgon2id;
+        private IAEADProvider? _aead;
         private IArgon2idParamsProvider? _argonParams;
-        private IArgonKeyProvider?       _argonKeyProvider;
-        private ILogger?                 _logger;
+        private IArgonKeyProvider? _argonKeyProvider;
+        private ILogger? _logger;
 
         /// <summary>Sets the password (raw UTF-8 bytes, not a string) and selects Argon2id protection.</summary>
         public StoreBuilder WithPassword(byte[] passwordUtf8,
                                          KeyProtectionMode mode = KeyProtectionMode.PasswordArgon2id)
         {
             _password = passwordUtf8;
-            _mode     = mode;
+            _mode = mode;
             return this;
         }
 
         /// <summary>Overrides the Argon2id parameter provider (default: <see cref="CalibratingArgon2idParamsProvider"/>).</summary>
-        public StoreBuilder WithArgon2id(IArgon2idParamsProvider provider)    { _argonParams      = provider; return this; }
+        public StoreBuilder WithArgon2id(IArgon2idParamsProvider provider) { _argonParams = provider; return this; }
 
         /// <summary>Overrides the Argon2id key derivation implementation.</summary>
-        public StoreBuilder WithArgonKeyProvider(IArgonKeyProvider provider)  { _argonKeyProvider = provider; return this; }
+        public StoreBuilder WithArgonKeyProvider(IArgonKeyProvider provider) { _argonKeyProvider = provider; return this; }
 
         /// <summary>Sets the AEAD provider used to encrypt individual records.</summary>
-        public StoreBuilder WithAead(IAEADProvider provider)                  { _aead             = provider; return this; }
+        public StoreBuilder WithAead(IAEADProvider provider) { _aead = provider; return this; }
 
         /// <summary>Attaches a logger.</summary>
-        public StoreBuilder WithLogger(ILogger logger)                        { _logger           = logger;   return this; }
+        public StoreBuilder WithLogger(ILogger logger) { _logger = logger; return this; }
 
         /// <summary>Opens or creates the store using the configured options.</summary>
         public Task<EncryptedEntryStore> OpenAsync(IAppendOnlyStoreProvider store,
@@ -168,14 +169,14 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             throw new ArgumentException("Entry ID must not be empty.", nameof(id));
 
         byte[] keyBytes = Encoding.UTF8.GetBytes(id);
-        long   seq      = Interlocked.Increment(ref _nextSeq);
-        byte[] nonce    = BuildNonce(seq);
-        const byte op   = 0;
+        long seq = Interlocked.Increment(ref _nextSeq);
+        byte[] nonce = BuildNonce(seq);
+        const byte op = 0;
 
         Span<byte> aad = BuildAad(op, seq, keyBytes.Length, value.Length);
 
         byte[] ct_buf = new byte[value.Length];
-        byte[] tag    = new byte[GCMTagLen];
+        byte[] tag = new byte[GCMTagLen];
 
         _aead.Encrypt(_dek.AsSpan(), nonce, aad, value.Span, ct_buf, tag);
 
@@ -242,9 +243,9 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         if (string.IsNullOrEmpty(id)) return;
 
         byte[] keyBytes = Encoding.UTF8.GetBytes(id);
-        long   seq      = Interlocked.Increment(ref _nextSeq);
-        byte[] nonce    = BuildNonce(seq);
-        const byte op   = 1;
+        long seq = Interlocked.Increment(ref _nextSeq);
+        byte[] nonce = BuildNonce(seq);
+        const byte op = 1;
 
         Span<byte> aad = BuildAad(op, seq, keyBytes.Length, 0);
         byte[] tag = new byte[GCMTagLen];
@@ -290,13 +291,13 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
                 byte[]? pt = await GetAsync(id, ct).ConfigureAwait(false);
                 if (pt is null) continue;
 
-                byte[]     keyBytes = Encoding.UTF8.GetBytes(id);
-                long       seq      = Interlocked.Increment(ref newSeq);
-                byte[]     nonce    = BuildNonce(seq);
-                const byte op       = 0;
+                byte[] keyBytes = Encoding.UTF8.GetBytes(id);
+                long seq = Interlocked.Increment(ref newSeq);
+                byte[] nonce = BuildNonce(seq);
+                const byte op = 0;
 
                 byte[] ctBuf = new byte[pt.Length];
-                byte[] tag   = new byte[_aead.TagSizeBytes];
+                byte[] tag = new byte[_aead.TagSizeBytes];
 
                 Span<byte> aad = BuildAad(op, seq, keyBytes.Length, ctBuf.Length);
 
@@ -381,11 +382,11 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416",
         Justification = "DPAPI path is guarded by OperatingSystem.IsWindows()")]
     public async Task RotateDekAsync(
-        byte[]                   currentPasswordUtf8,
-        byte[]?                  newPasswordUtf8  = null,
-        KeyProtectionMode?       newMode          = null,
-        IArgon2idParamsProvider? newArgonParams   = null,
-        CancellationToken        ct               = default)
+        byte[] currentPasswordUtf8,
+        byte[]? newPasswordUtf8 = null,
+        KeyProtectionMode? newMode = null,
+        IArgon2idParamsProvider? newArgonParams = null,
+        CancellationToken ct = default)
     {
         // Read the current mode from the on-disk header so we can validate the
         // current password and know which mode to inherit if newMode is null.
@@ -417,11 +418,11 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
                     "Current password is incorrect. Key rotation aborted.");
         }
 
-        KeyProtectionMode targetMode     = newMode ?? currentMode;
-        byte[]            targetPassword = newPasswordUtf8 ?? currentPasswordUtf8 ?? [];
+        KeyProtectionMode targetMode = newMode ?? currentMode;
+        byte[] targetPassword = newPasswordUtf8 ?? currentPasswordUtf8 ?? [];
 
         // Generate fresh DEK and NoncePrefix.
-        byte[] newDek         = MemoryBlockHelper.RandomBytes(32);
+        byte[] newDek = MemoryBlockHelper.RandomBytes(32);
         byte[] newNoncePrefix = MemoryBlockHelper.RandomBytes(NoncePrefixLen);
 
         // Atomically rewrite the entire store with the new key material.
@@ -430,15 +431,15 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
              .ConfigureAwait(false);
 
         // Swap in-memory key material only after the file has been safely written.
-        SensitiveBytes oldDek         = _dek;
+        SensitiveBytes oldDek = _dek;
         SensitiveBytes oldNoncePrefix = _noncePrefix;
 
-        var freshDek    = new SensitiveBytes(32);
+        var freshDek = new SensitiveBytes(32);
         var freshPrefix = new SensitiveBytes(NoncePrefixLen);
         newDek.AsSpan().CopyTo(freshDek.AsSpan());
         newNoncePrefix.AsSpan().CopyTo(freshPrefix.AsSpan());
 
-        _dek         = freshDek;
+        _dek = freshDek;
         _noncePrefix = freshPrefix;
 
         // Zero and dispose old key material.
@@ -481,12 +482,12 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416",
         Justification = "DPAPI path is guarded by OperatingSystem.IsWindows()")]
     private async Task RewriteWithNewKeyAsync(
-        byte[]                   newDek,
-        byte[]                   newNoncePrefix,
-        KeyProtectionMode        mode,
-        byte[]                   passwordUtf8,
+        byte[] newDek,
+        byte[] newNoncePrefix,
+        KeyProtectionMode mode,
+        byte[] passwordUtf8,
         IArgon2idParamsProvider? argonParams,
-        CancellationToken        ct)
+        CancellationToken ct)
     {
         // Snapshot the live plaintext values of all entries before touching the file.
         // We must read them now while the old DEK is still active.
@@ -515,14 +516,14 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             long newSeq = 0;
             foreach (var (id, pt) in snapshots)
             {
-                byte[]     keyBytes = Encoding.UTF8.GetBytes(id);
-                long       seq      = Interlocked.Increment(ref newSeq);
-                byte[]     nonce    = BuildNonce(newNoncePrefix, seq);
-                const byte op       = 0;
+                byte[] keyBytes = Encoding.UTF8.GetBytes(id);
+                long seq = Interlocked.Increment(ref newSeq);
+                byte[] nonce = BuildNonce(newNoncePrefix, seq);
+                const byte op = 0;
 
                 byte[] ctBuf = new byte[pt.Length];
-                byte[] tag   = new byte[_aead.TagSizeBytes];
-                byte[] aad   = BuildAad(op, seq, keyBytes.Length, ctBuf.Length);
+                byte[] tag = new byte[_aead.TagSizeBytes];
+                byte[] aad = BuildAad(op, seq, keyBytes.Length, ctBuf.Length);
 
                 try
                 {
@@ -533,7 +534,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
                     CryptographicOperations.ZeroMemory(aad);
                 }
 
-                int    total  = RecordFixedPrefixLen + nonce.Length + keyBytes.Length + ctBuf.Length + tag.Length;
+                int total = RecordFixedPrefixLen + nonce.Length + keyBytes.Length + ctBuf.Length + tag.Length;
                 byte[] recBuf = new byte[total];
                 SerializeRecord(recBuf, op, seq, nonce, keyBytes, ctBuf, tag);
                 await stream.WriteAsync(recBuf, 0, total, ct).ConfigureAwait(false);
@@ -571,8 +572,8 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     {
         byte[] aad = new byte[17];
         aad[0] = op;
-        BinaryPrimitives.WriteInt64LittleEndian(aad.AsSpan(1, 8),  seq);
-        BinaryPrimitives.WriteInt32LittleEndian(aad.AsSpan(9, 4),  keyLen);
+        BinaryPrimitives.WriteInt64LittleEndian(aad.AsSpan(1, 8), seq);
+        BinaryPrimitives.WriteInt32LittleEndian(aad.AsSpan(9, 4), keyLen);
         BinaryPrimitives.WriteInt32LittleEndian(aad.AsSpan(13, 4), ctLen);
         return aad;
     }
@@ -582,12 +583,12 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     {
         int off = 0;
         buf[off++] = op;
-        BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(off, 8), seq);   off += 8;
+        BinaryPrimitives.WriteInt64LittleEndian(buf.AsSpan(off, 8), seq); off += 8;
         BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(off, 4), keyBytes.Length); off += 4;
-        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(off, 4), ct.Length);       off += 4;
-        nonce.CopyTo(buf.AsSpan(off, nonce.Length));    off += nonce.Length;
+        BinaryPrimitives.WriteInt32LittleEndian(buf.AsSpan(off, 4), ct.Length); off += 4;
+        nonce.CopyTo(buf.AsSpan(off, nonce.Length)); off += nonce.Length;
         keyBytes.CopyTo(buf.AsSpan(off, keyBytes.Length)); off += keyBytes.Length;
-        ct.CopyTo(buf.AsSpan(off, ct.Length));          off += ct.Length;
+        ct.CopyTo(buf.AsSpan(off, ct.Length)); off += ct.Length;
         tag.CopyTo(buf.AsSpan(off, tag.Length));
     }
 
@@ -601,34 +602,34 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         if (seg.Count < RecordFixedPrefixLen) return false;
 
         int off = seg.Offset;
-        op     = seg.Array![off++];
-        seq    = BinaryPrimitives.ReadInt64LittleEndian(seg.Array.AsSpan(off, 8));  off += 8;
-        keyLen = BinaryPrimitives.ReadInt32LittleEndian(seg.Array.AsSpan(off, 4));  off += 4;
-        ctLen  = BinaryPrimitives.ReadInt32LittleEndian(seg.Array.AsSpan(off, 4));  off += 4;
+        op = seg.Array![off++];
+        seq = BinaryPrimitives.ReadInt64LittleEndian(seg.Array.AsSpan(off, 8)); off += 8;
+        keyLen = BinaryPrimitives.ReadInt32LittleEndian(seg.Array.AsSpan(off, 4)); off += 4;
+        ctLen = BinaryPrimitives.ReadInt32LittleEndian(seg.Array.AsSpan(off, 4)); off += 4;
 
         int nonceLen = _aead.NonceSizeBytes;
-        int tagLen   = _aead.TagSizeBytes;
+        int tagLen = _aead.TagSizeBytes;
 
         if (seg.Count < RecordFixedPrefixLen + nonceLen + keyLen + ctLen + tagLen) return false;
 
-        nonce    = seg.Array.AsSpan(off, nonceLen).ToArray();   off += nonceLen;
-        keyBytes = seg.Array.AsSpan(off, keyLen).ToArray();     off += keyLen;
-        ctBuf    = seg.Array.AsSpan(off, ctLen).ToArray();      off += ctLen;
-        tag      = seg.Array.AsSpan(off, tagLen).ToArray();
+        nonce = seg.Array.AsSpan(off, nonceLen).ToArray(); off += nonceLen;
+        keyBytes = seg.Array.AsSpan(off, keyLen).ToArray(); off += keyLen;
+        ctBuf = seg.Array.AsSpan(off, ctLen).ToArray(); off += ctLen;
+        tag = seg.Array.AsSpan(off, tagLen).ToArray();
         return true;
     }
 
     private async Task<long> RebuildIndexAsync(IAppendOnlyStoreProvider store, CancellationToken ct)
     {
-        long pos     = await HeaderEndOffsetAsync(store, ct).ConfigureAwait(false);
+        long pos = await HeaderEndOffsetAsync(store, ct).ConfigureAwait(false);
         long fileLen = await store.GetLengthAsync(ct).ConfigureAwait(false);
 
         var newIndex = new Dictionary<string, IndexEntry>(StringComparer.Ordinal);
         long maxSeq = 0;
 
-        byte[] prefix  = new byte[RecordFixedPrefixLen];
-        int    nonceLen = _aead.NonceSizeBytes;
-        int    tagLen   = _aead.TagSizeBytes;
+        byte[] prefix = new byte[RecordFixedPrefixLen];
+        int nonceLen = _aead.NonceSizeBytes;
+        int tagLen = _aead.TagSizeBytes;
 
         while (pos < fileLen)
         {
@@ -636,10 +637,10 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             if (got == 0) break;
             if (got != prefix.Length) throw new InvalidDataException("Truncated record (prefix).");
 
-            byte op     = prefix[0];
-            long seq    = BinaryPrimitives.ReadInt64LittleEndian(prefix.AsSpan(1, 8));
-            int  keyLen = BinaryPrimitives.ReadInt32LittleEndian(prefix.AsSpan(9, 4));
-            int  ctLen  = BinaryPrimitives.ReadInt32LittleEndian(prefix.AsSpan(13, 4));
+            byte op = prefix[0];
+            long seq = BinaryPrimitives.ReadInt64LittleEndian(prefix.AsSpan(1, 8));
+            int keyLen = BinaryPrimitives.ReadInt32LittleEndian(prefix.AsSpan(9, 4));
+            int ctLen = BinaryPrimitives.ReadInt32LittleEndian(prefix.AsSpan(13, 4));
 
             int restLen = nonceLen + keyLen + ctLen + tagLen;
             if (restLen < 0) throw new InvalidDataException("Record length overflow.");
@@ -649,9 +650,9 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             if (got != restLen) throw new InvalidDataException("Truncated record (body).");
 
             // Extract key (no decryption needed)
-            int    keyOff  = nonceLen;
-            string id      = Encoding.UTF8.GetString(rest, keyOff, keyLen);
-            int    total   = prefix.Length + restLen;
+            int keyOff = nonceLen;
+            string id = Encoding.UTF8.GetString(rest, keyOff, keyLen);
+            int total = prefix.Length + restLen;
 
             newIndex[id] = new IndexEntry(seq, pos, total, Deleted: op == 1);
             if (seq > maxSeq) maxSeq = seq;
@@ -694,7 +695,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         if (got != headerLen) throw new InvalidDataException("Incomplete header payload.");
 
         await dest.WriteAsync(fixedPart, ct).ConfigureAwait(false);
-        await dest.WriteAsync(payload,   ct).ConfigureAwait(false);
+        await dest.WriteAsync(payload, ct).ConfigureAwait(false);
     }
 
     #endregion
@@ -705,14 +706,14 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         Justification = "DPAPI path is guarded by OperatingSystem.IsWindows()")]
     internal static async Task<EncryptedEntryStore> OpenCoreAsync(
         IAppendOnlyStoreProvider store,
-        IAtomicReplace           replacer,
-        IAEADProvider            aead,
-        KeyProtectionMode        mode,
-        byte[]                   passwordUtf8,
+        IAtomicReplace replacer,
+        IAEADProvider aead,
+        KeyProtectionMode mode,
+        byte[] passwordUtf8,
         IArgon2idParamsProvider? argonParamsProvider,
-        IArgonKeyProvider?       argonKeyProvider,
-        ILogger?                 logger,
-        CancellationToken        ct)
+        IArgonKeyProvider? argonKeyProvider,
+        ILogger? logger,
+        CancellationToken ct)
     {
         argonKeyProvider ??= new ArgonKeyProvider();
 
@@ -720,7 +721,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
 
         if (len == 0)
         {
-            byte[] dek         = MemoryBlockHelper.RandomBytes(32);
+            byte[] dek = MemoryBlockHelper.RandomBytes(32);
             byte[] noncePrefix = MemoryBlockHelper.RandomBytes(NoncePrefixLen);
 
             using var ms = new MemoryStream(DefaultMemBufDim);
@@ -752,13 +753,13 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416",
         Justification = "DPAPI path is guarded by OperatingSystem.IsWindows()")]
     private static void WriteHeader(Stream dest,
-                                    byte[]                   dek,
-                                    byte[]                   noncePrefix,
-                                    KeyProtectionMode        mode,
-                                    IAEADProvider            aead,
-                                    ReadOnlySpan<byte>       passwordUtf8,
+                                    byte[] dek,
+                                    byte[] noncePrefix,
+                                    KeyProtectionMode mode,
+                                    IAEADProvider aead,
+                                    ReadOnlySpan<byte> passwordUtf8,
                                     IArgon2idParamsProvider? argonParamsProvider,
-                                    IArgonKeyProvider        argonKeyProvider)
+                                    IArgonKeyProvider argonKeyProvider)
     {
         byte[] modePayload = BuildModePayload(mode, dek, aead, passwordUtf8,
                                               argonParamsProvider, argonKeyProvider);
@@ -779,95 +780,99 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
 
     private static byte GetAeadId(IAEADProvider aead) => aead switch
     {
-        AesCtrHmacSha256Provider  => (byte)AeadAlgorithmId.AesCtrHmacSha256,
-        AesGcmProvider            => (byte)AeadAlgorithmId.AesGcm,
-        _                         => GetAeadIdByName(aead.Name),
+        AesCtrHmacSha256Provider => (byte)AeadAlgorithmId.AesCtrHmacSha256,
+        AesGcmProvider => (byte)AeadAlgorithmId.AesGcm,
+        _ => GetAeadIdByName(aead.Name),
     };
 
     private static byte GetAeadIdByName(string name) => name switch
     {
-        "AES-GCM"                      => (byte)AeadAlgorithmId.AesGcm,
-        "ChaCha20-Poly1305"            => (byte)AeadAlgorithmId.ChaCha20Poly1305,
-        "AES-CTR+HMAC-SHA256 (EtM)"   => (byte)AeadAlgorithmId.AesCtrHmacSha256,
+        "AES-GCM" => (byte)AeadAlgorithmId.AesGcm,
+        "ChaCha20-Poly1305" => (byte)AeadAlgorithmId.ChaCha20Poly1305,
+        "AES-CTR+HMAC-SHA256 (EtM)" => (byte)AeadAlgorithmId.AesCtrHmacSha256,
         _ => throw new NotSupportedException(
                  $"Cannot determine AeadAlgorithmId for provider '{name}'. " +
                  $"Override GetAeadId() or use a known provider.")
     };
 
     private static byte[] BuildModePayload(KeyProtectionMode mode,
-                                           byte[]                   dek,
-                                           IAEADProvider            aead,
-                                           ReadOnlySpan<byte>       passwordUtf8,
+                                           byte[] dek,
+                                           IAEADProvider aead,
+                                           ReadOnlySpan<byte> passwordUtf8,
                                            IArgon2idParamsProvider? argonParamsProvider,
-                                           IArgonKeyProvider        argonKeyProvider)
+                                           IArgonKeyProvider argonKeyProvider)
     {
         switch (mode)
         {
             case KeyProtectionMode.PasswordArgon2id:
-            {
-                if (passwordUtf8.IsEmpty)
-                    throw new ArgumentException("Password is required for Argon2id mode.");
+                {
+                    if (passwordUtf8.IsEmpty)
+                        throw new ArgumentException("Password is required for Argon2id mode.");
 
-                var argonProvider = argonParamsProvider ?? new CalibratingArgon2idParamsProvider();
-                Argon2idParams p  = argonProvider.GetParameters();
-                byte[] salt       = MemoryBlockHelper.RandomBytes(16);
-                byte[] pwdTmp     = passwordUtf8.ToArray();
-                byte[] kek        = argonKeyProvider.DeriveKey(pwdTmp, salt, p);
-                CryptographicOperations.ZeroMemory(pwdTmp);
+                    var argonProvider = argonParamsProvider ?? new CalibratingArgon2idParamsProvider();
+                    Argon2idParams p = argonProvider.GetParameters();
+                    byte[] salt = MemoryBlockHelper.RandomBytes(16);
+                    byte[] pwdTmp = passwordUtf8.ToArray();
+                    byte[] kek = argonKeyProvider.DeriveKey(pwdTmp, salt, p);
+                    CryptographicOperations.ZeroMemory(pwdTmp);
 
-                byte[] nonce  = MemoryBlockHelper.RandomBytes(GCMNonceLen);
-                byte[] encDek = new byte[dek.Length];
-                byte[] tag    = new byte[GCMTagLen];
-                aead.Encrypt(kek, nonce, ReadOnlySpan<byte>.Empty, dek, encDek, tag);
-                CryptographicOperations.ZeroMemory(kek);
+                    byte[] nonce = MemoryBlockHelper.RandomBytes(GCMNonceLen);
+                    byte[] encDek = new byte[dek.Length];
+                    byte[] tag = new byte[GCMTagLen];
+                    aead.Encrypt(kek, nonce, ReadOnlySpan<byte>.Empty, dek, encDek, tag);
+                    CryptographicOperations.ZeroMemory(kek);
 
-                // Layout: SaltLen(2) Salt MemKiB(4) Iters(4) Par(4) Nonce(12) EncDek(32) Tag(16)
-                var payload = new byte[2 + salt.Length + 4 + 4 + 4 + GCMNonceLen + encDek.Length + GCMTagLen];
-                var span = payload.AsSpan();
-                BinaryPrimitives.WriteUInt16LittleEndian(span, (ushort)salt.Length); span = span[2..];
-                salt.CopyTo(span); span = span[salt.Length..];
-                BinaryPrimitives.WriteInt32LittleEndian(span, p.MemoryKiB);   span = span[4..];
-                BinaryPrimitives.WriteInt32LittleEndian(span, p.Iterations);  span = span[4..];
-                BinaryPrimitives.WriteInt32LittleEndian(span, p.Parallelism); span = span[4..];
-                nonce.CopyTo(span);  span = span[GCMNonceLen..];
-                encDek.CopyTo(span); span = span[encDek.Length..];
-                tag.CopyTo(span);
-                return payload;
-            }
+                    // Layout: SaltLen(2) Salt MemKiB(4) Iters(4) Par(4) Nonce(12) EncDek(32) Tag(16)
+                    var payload = new byte[2 + salt.Length + 4 + 4 + 4 + GCMNonceLen + encDek.Length + GCMTagLen];
+                    var span = payload.AsSpan();
+                    BinaryPrimitives.WriteUInt16LittleEndian(span, (ushort)salt.Length); span = span[2..];
+                    salt.CopyTo(span); span = span[salt.Length..];
+                    BinaryPrimitives.WriteInt32LittleEndian(span, p.MemoryKiB); span = span[4..];
+                    BinaryPrimitives.WriteInt32LittleEndian(span, p.Iterations); span = span[4..];
+                    BinaryPrimitives.WriteInt32LittleEndian(span, p.Parallelism); span = span[4..];
+                    nonce.CopyTo(span); span = span[GCMNonceLen..];
+                    encDek.CopyTo(span); span = span[encDek.Length..];
+                    tag.CopyTo(span);
+
+                    return payload;
+                }
 
             case KeyProtectionMode.WindowsDPAPI:
-            {
-                if (!OperatingSystem.IsWindows())
-                    throw new PlatformNotSupportedException("Windows DPAPI is not available on this platform.");
-                return ProtectedData.Protect(dek, null, DataProtectionScope.CurrentUser);
-            }
+                {
+                    if (!OperatingSystem.IsWindows())
+                        throw new PlatformNotSupportedException("Windows DPAPI is not available on this platform.");
+
+                    return ProtectedData.Protect(dek, null, DataProtectionScope.CurrentUser);
+                }
 
             case KeyProtectionMode.PasswordPBKDF2:
-            {
-                if (passwordUtf8.IsEmpty)
-                    throw new ArgumentException("Password is required for PBKDF2 mode.");
+                {
+                    if (passwordUtf8.IsEmpty)
+                        throw new ArgumentException("Password is required for PBKDF2 mode.");
 
-                byte[] salt  = MemoryBlockHelper.RandomBytes(16);
-                int    iters = DefaultPbkdf2Iters;
-                using var kdf = new Rfc2898DeriveBytes(passwordUtf8.ToArray(), salt, iters, HashAlgorithmName.SHA256);
-                byte[] kek   = kdf.GetBytes(32);
-                byte[] nonce = MemoryBlockHelper.RandomBytes(GCMNonceLen);
-                byte[] encDek = new byte[dek.Length];
-                byte[] tag   = new byte[GCMTagLen];
-                aead.Encrypt(kek, nonce, ReadOnlySpan<byte>.Empty, dek, encDek, tag);
-                CryptographicOperations.ZeroMemory(kek);
+                    byte[] salt = MemoryBlockHelper.RandomBytes(16);
+                    int iters = DefaultPbkdf2Iters;
+                    // using var kdf = new Rfc2898DeriveBytes(passwordUtf8.ToArray(), salt, iters, HashAlgorithmName.SHA256);
+                    byte[] kek = Rfc2898DeriveBytes.Pbkdf2(passwordUtf8, salt, iters, HashAlgorithmName.SHA256, 32);
+                    byte[] nonce = MemoryBlockHelper.RandomBytes(GCMNonceLen);
+                    byte[] encDek = new byte[dek.Length];
+                    byte[] tag = new byte[GCMTagLen];
 
-                // Layout: SaltLen(2) Salt Iters(4) Nonce(12) EncDek(32) Tag(16)
-                var payload = new byte[2 + salt.Length + 4 + GCMNonceLen + encDek.Length + GCMTagLen];
-                var span = payload.AsSpan();
-                BinaryPrimitives.WriteUInt16LittleEndian(span, (ushort)salt.Length); span = span[2..];
-                salt.CopyTo(span);   span = span[salt.Length..];
-                BinaryPrimitives.WriteInt32LittleEndian(span, iters); span = span[4..];
-                nonce.CopyTo(span);  span = span[GCMNonceLen..];
-                encDek.CopyTo(span); span = span[encDek.Length..];
-                tag.CopyTo(span);
-                return payload;
-            }
+                    aead.Encrypt(kek, nonce, ReadOnlySpan<byte>.Empty, dek, encDek, tag);
+                    CryptographicOperations.ZeroMemory(kek);
+
+                    // Layout: SaltLen(2) Salt Iters(4) Nonce(12) EncDek(32) Tag(16)
+                    byte[] payload = new byte[2 + salt.Length + 4 + GCMNonceLen + encDek.Length + GCMTagLen];
+                    Span<byte> span = payload.AsSpan();
+                    BinaryPrimitives.WriteUInt16LittleEndian(span, (ushort)salt.Length); span = span[2..];
+                    salt.CopyTo(span); span = span[salt.Length..];
+                    BinaryPrimitives.WriteInt32LittleEndian(span, iters); span = span[4..];
+                    nonce.CopyTo(span); span = span[GCMNonceLen..];
+                    encDek.CopyTo(span); span = span[encDek.Length..];
+                    tag.CopyTo(span);
+
+                    return payload;
+                }
 
             default:
                 throw new NotSupportedException($"Protection mode {mode} is not supported.");
@@ -878,26 +883,26 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         Justification = "DPAPI path is guarded by OperatingSystem.IsWindows()")]
     private static async Task<(byte[] Dek, byte[] NoncePrefix)> ReadHeaderAsync(
         IAppendOnlyStoreProvider store,
-        IAEADProvider            aead,
-        KeyProtectionMode        expectedMode,
-        byte[]                   passwordUtf8,
-        IArgonKeyProvider        argonKeyProvider,
-        CancellationToken        ct)
+        IAEADProvider aead,
+        KeyProtectionMode expectedMode,
+        byte[] passwordUtf8,
+        IArgonKeyProvider argonKeyProvider,
+        CancellationToken ct)
     {
         byte[] fixedHdr = new byte[FixedHeaderSize];
         int got = await store.ReadAtAsync(0, fixedHdr, ct).ConfigureAwait(false);
         if (got != FixedHeaderSize) throw new InvalidDataException("Incomplete fixed header.");
 
         uint magic = BinaryPrimitives.ReadUInt32LittleEndian(fixedHdr);
-        if (magic != MagicNumber)   throw new InvalidDataException("Wrong magic number (not an EES store).");
+        if (magic != MagicNumber) throw new InvalidDataException("Wrong magic number (not an EES store).");
 
         byte ver = fixedHdr[4];
         if (ver != Version)
             throw new NotSupportedException($"Store version {ver} is not supported (expected {Version}).");
 
-        var    modeOnDisk  = (KeyProtectionMode)fixedHdr[5];
-        var    aeadIdOnDisk = (AeadAlgorithmId)fixedHdr[6];
-        byte   expectedId  = GetAeadId(aead);
+        var modeOnDisk = (KeyProtectionMode)fixedHdr[5];
+        var aeadIdOnDisk = (AeadAlgorithmId)fixedHdr[6];
+        byte expectedId = GetAeadId(aead);
 
         if ((byte)aeadIdOnDisk != expectedId)
             throw new InvalidOperationException(
@@ -913,15 +918,15 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         got = await store.ReadAtAsync(FixedHeaderSize, fullPayload, ct).ConfigureAwait(false);
         if (got != fullPayload.Length) throw new InvalidDataException("Incomplete header payload.");
 
-        int    modePayloadLen = totalHeaderLen - NoncePrefixLen;
-        byte[] modePayload    = fullPayload[..modePayloadLen];
-        byte[] noncePrefix    = fullPayload[modePayloadLen..];
+        int modePayloadLen = totalHeaderLen - NoncePrefixLen;
+        byte[] modePayload = fullPayload[..modePayloadLen];
+        byte[] noncePrefix = fullPayload[modePayloadLen..];
 
         byte[] dek = modeOnDisk switch
         {
             KeyProtectionMode.PasswordArgon2id => DecryptDekArgon2id(modePayload, aead, passwordUtf8, argonKeyProvider),
-            KeyProtectionMode.WindowsDPAPI     => DecryptDekDpapi(modePayload),
-            KeyProtectionMode.PasswordPBKDF2   => DecryptDekPbkdf2(modePayload, aead, passwordUtf8),
+            KeyProtectionMode.WindowsDPAPI => DecryptDekDpapi(modePayload),
+            KeyProtectionMode.PasswordPBKDF2 => DecryptDekPbkdf2(modePayload, aead, passwordUtf8),
             _ => throw new NotSupportedException($"Protection mode {modeOnDisk} is not supported.")
         };
 
@@ -929,59 +934,115 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     }
 
     private static byte[] DecryptDekArgon2id(byte[] payload, IAEADProvider aead,
-                                              byte[] passwordUtf8, IArgonKeyProvider kp)
+                                             byte[] passwordUtf8, IArgonKeyProvider kp)
     {
-        if (passwordUtf8.Length == 0) throw new ArgumentException("Password required for Argon2id.");
-        var span = new ArraySegment<byte>(payload);
+        if (passwordUtf8.Length == 0)
+            throw new ArgumentException("Password required for Argon2id.");
 
-        ushort saltLen = BinaryPrimitives.ReadUInt16LittleEndian(span); span = span[2..];
-        byte[] salt    = span[..saltLen].ToArray();                     span = span[saltLen..];
-        int memKiB     = BinaryPrimitives.ReadInt32LittleEndian(span);  span = span[4..];
-        int iters      = BinaryPrimitives.ReadInt32LittleEndian(span);  span = span[4..];
-        int par        = BinaryPrimitives.ReadInt32LittleEndian(span);  span = span[4..];
-        byte[] nonce   = span[..GCMNonceLen].ToArray();                 span = span[GCMNonceLen..];
-        int encDekLen  = span.Count - GCMTagLen;
-        byte[] encDek  = span[..encDekLen].ToArray();
-        byte[] tag     = span[encDekLen..].ToArray();
+        ArraySegment<byte> span = new ArraySegment<byte>(payload);
 
-        var p = new Argon2idParams(memKiB, iters, par);
+        ushort saltLen = BinaryPrimitives.ReadUInt16LittleEndian(span);
+        span = span[2..];
+
+        byte[] salt = [.. span[..saltLen]];
+        span = span[saltLen..];
+
+        int memKiB = BinaryPrimitives.ReadInt32LittleEndian(span);
+        span = span[4..];
+
+        int iters = BinaryPrimitives.ReadInt32LittleEndian(span);
+        span = span[4..];
+
+        int par = BinaryPrimitives.ReadInt32LittleEndian(span);
+        span = span[4..];
+
+        byte[] nonce = [.. span[..GCMNonceLen]];
+        span = span[GCMNonceLen..];
+
+        int encDekLen = span.Count - GCMTagLen;
+        byte[] encDek = [.. span[..encDekLen]];
+        byte[] tag = [.. span[encDekLen..]];
+
+        Argon2idParams p = new(memKiB, iters, par);
         byte[] pwdTmp = [.. passwordUtf8];
-        byte[] kek    = kp.DeriveKey(pwdTmp, salt, p);
+        byte[] kek = kp.DeriveKey(pwdTmp, salt, p);
         CryptographicOperations.ZeroMemory(pwdTmp);
 
         byte[] dek = new byte[encDek.Length];
-        try   { aead.Decrypt(kek, nonce, ReadOnlySpan<byte>.Empty, encDek, tag, dek); }
-        finally { CryptographicOperations.ZeroMemory(kek); }
+        bool dekValid;
+
+        try
+        {
+            dekValid = aead.Decrypt(kek, nonce, [], encDek, tag, dek);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(kek);
+        }
+
+        if (!dekValid)
+        {
+            CryptographicOperations.ZeroMemory(dek);
+            throw new CryptographicException("Failed to decrypt the store DEK. The password is incorrect or the header is corrupted.");
+        }
+
         return dek;
     }
 
-    [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416",
-        Justification = "Guarded by OperatingSystem.IsWindows()")]
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability",
+                                                     "CA1416",
+                                                     Justification = "Guarded by OperatingSystem.IsWindows()")]
     private static byte[] DecryptDekDpapi(byte[] payload)
     {
         if (!OperatingSystem.IsWindows())
             throw new PlatformNotSupportedException("Windows DPAPI is not available on this platform.");
+
         return ProtectedData.Unprotect(payload, null, DataProtectionScope.CurrentUser);
     }
 
     private static byte[] DecryptDekPbkdf2(byte[] payload, IAEADProvider aead, byte[] passwordUtf8)
     {
-        if (passwordUtf8.Length == 0) throw new ArgumentException("Password required for PBKDF2.");
-        var span = new ArraySegment<byte>(payload);
+        if (passwordUtf8.Length == 0)
+            throw new ArgumentException("Password required for PBKDF2.");
 
-        ushort saltLen = BinaryPrimitives.ReadUInt16LittleEndian(span); span = span[2..];
-        byte[] salt    = span[..saltLen].ToArray();                     span = span[saltLen..];
-        int    iters   = BinaryPrimitives.ReadInt32LittleEndian(span);  span = span[4..];
-        byte[] nonce   = span[..GCMNonceLen].ToArray();                 span = span[GCMNonceLen..];
-        int encDekLen  = span.Count - GCMTagLen;
-        byte[] encDek  = span[..encDekLen].ToArray();
-        byte[] tag     = span[encDekLen..].ToArray();
+        ArraySegment<byte> span = new(payload);
 
-        using var kdf = new Rfc2898DeriveBytes([.. passwordUtf8], salt, iters, HashAlgorithmName.SHA256);
-        byte[] kek = kdf.GetBytes(32);
+        ushort saltLen = BinaryPrimitives.ReadUInt16LittleEndian(span);
+        span = span[2..];
+
+        byte[] salt = [.. span[..saltLen]];
+        span = span[saltLen..];
+
+        int iters = BinaryPrimitives.ReadInt32LittleEndian(span);
+        span = span[4..];
+
+        byte[] nonce = [.. span[..GCMNonceLen]];
+        span = span[GCMNonceLen..];
+
+        int encDekLen = span.Count - GCMTagLen;
+        byte[] encDek = [.. span[..encDekLen]];
+        byte[] tag = [.. span[encDekLen..]];
+
+        // using Rfc2898DeriveBytes kdf = new ([.. passwordUtf8], salt, iters, HashAlgorithmName.SHA256);
+        byte[] kek = Rfc2898DeriveBytes.Pbkdf2(passwordUtf8, salt, iters, HashAlgorithmName.SHA256, 32);
         byte[] dek = new byte[encDek.Length];
-        try   { aead.Decrypt(kek, nonce, ReadOnlySpan<byte>.Empty, encDek, tag, dek); }
-        finally { CryptographicOperations.ZeroMemory(kek); }
+        bool validDek;
+
+        try
+        {
+            validDek = aead.Decrypt(kek, nonce, ReadOnlySpan<byte>.Empty, encDek, tag, dek);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(kek);
+        }
+
+        if (!validDek)
+        {
+            CryptographicOperations.ZeroMemory(dek);
+            throw new CryptographicException("Failed to decrypt the store DEK. The password is incorrect or the header is corrupted.");
+        }
+
         return dek;
     }
 
