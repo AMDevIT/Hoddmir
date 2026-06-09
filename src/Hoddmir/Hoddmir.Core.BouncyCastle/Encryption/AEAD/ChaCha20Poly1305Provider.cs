@@ -11,36 +11,48 @@ namespace Hoddmir.BouncyCastle.Encryption.AEAD;
 /// ChaCha20-Poly1305 AEAD provider backed by BouncyCastle.
 /// Available on all .NET target frameworks including net8.0, iOS, and Android.
 /// </summary>
-public sealed class ChaCha20Poly1305Provider : IAEADProvider
+public sealed class ChaCha20Poly1305Provider(ILogger? logger = null)
+    : IAEADProvider
 {
-    public static readonly AeadAlgorithmId AlgorithmId = AeadAlgorithmId.ChaCha20Poly1305;
+    #region Consts
 
     private const string ProviderName = "ChaCha20-Poly1305";
     private const int KeySize   = 32;
     private const int NonceSize = 12;
     private const int TagSize   = 16;
 
-    private readonly ILogger? _logger;
+    #endregion
+
+    #region Fields
+
+    public static readonly AeadAlgorithmId AlgorithmId = AeadAlgorithmId.ChaCha20Poly1305;
+    private readonly ILogger? logger = logger;
+
+    #endregion
+
+    #region Properties
 
     public string Name         => ProviderName;
     public int KeySizeBytes    => KeySize;
     public int NonceSizeBytes  => NonceSize;
     public int TagSizeBytes    => TagSize;
 
-    public ChaCha20Poly1305Provider(ILogger? logger = null) => _logger = logger;
+    #endregion
+
+    #region Methods
 
     public void Encrypt(ReadOnlySpan<byte> key, ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> aad,
                         ReadOnlySpan<byte> plaintext, Span<byte> ciphertext, Span<byte> tag)
     {
         if (key.Length != KeySize || nonce.Length != NonceSize || tag.Length != TagSize)
         {
-            _logger?.LogDebug("ChaCha20-Poly1305 Encrypt: bad sizes key={K} nonce={N} tag={T}",
+            logger?.LogDebug("ChaCha20-Poly1305 Encrypt: bad sizes key={K} nonce={N} tag={T}",
                               key.Length, nonce.Length, tag.Length);
             throw new ArgumentException("Invalid key, nonce, or tag length.");
         }
         if (ciphertext.Length != plaintext.Length)
         {
-            _logger?.LogDebug("ChaCha20-Poly1305 Encrypt: ciphertext length {CT} != plaintext length {PT}",
+            logger?.LogDebug("ChaCha20-Poly1305 Encrypt: ciphertext length {CT} != plaintext length {PT}",
                               ciphertext.Length, plaintext.Length);
             throw new ArgumentException("Ciphertext span must equal plaintext length.");
         }
@@ -66,24 +78,29 @@ public sealed class ChaCha20Poly1305Provider : IAEADProvider
     {
         if (key.Length != KeySize || nonce.Length != NonceSize || tag.Length != TagSize)
         {
-            _logger?.LogDebug("ChaCha20-Poly1305 Decrypt: bad sizes key={K} nonce={N} tag={T}",
-                              key.Length, nonce.Length, tag.Length);
+            if (logger?.IsEnabled(LogLevel.Debug) == true)
+                logger.LogDebug("ChaCha20-Poly1305 Decrypt: bad sizes key={K} nonce={N} tag={T}",
+                                key.Length, 
+                                nonce.Length, 
+                                tag.Length);
             return false;
         }
         if (plaintext.Length != ciphertext.Length)
         {
-            _logger?.LogDebug("ChaCha20-Poly1305 Decrypt: plaintext length {PT} != ciphertext length {CT}",
-                              plaintext.Length, ciphertext.Length);
+            if (logger?.IsEnabled(LogLevel.Debug) == true)
+                logger.LogDebug("ChaCha20-Poly1305 Decrypt: plaintext length {PT} != ciphertext length {CT}",
+                                plaintext.Length, 
+                                ciphertext.Length);
             return false;
         }
 
-        var aead = new ChaCha20Poly1305();
+        ChaCha20Poly1305 aead = new ();
         aead.Init(false, new ParametersWithIV(new KeyParameter(key.ToArray()), nonce.ToArray()));
 
         if (!aad.IsEmpty)
             aead.ProcessAadBytes(aad.ToArray(), 0, aad.Length);
 
-        var ptTmp = new byte[plaintext.Length];
+        byte[] ptTmp = new byte[plaintext.Length];
         try
         {
             int outLen = aead.ProcessBytes(ciphertext.ToArray(), 0, ciphertext.Length, ptTmp, 0);
@@ -95,7 +112,8 @@ public sealed class ChaCha20Poly1305Provider : IAEADProvider
         }
         catch (InvalidCipherTextException)
         {
-            _logger?.LogDebug("ChaCha20-Poly1305 Decrypt: authentication failed.");
+            if (logger?.IsEnabled(LogLevel.Debug) == true)
+                logger.LogDebug("ChaCha20-Poly1305 Decrypt: authentication failed.");
             return false;
         }
         finally
@@ -104,6 +122,11 @@ public sealed class ChaCha20Poly1305Provider : IAEADProvider
         }
     }
 
-    public override string ToString() =>
-        $"Provider: {Name}, Key: {KeySizeBytes * 8} bits, Nonce: {NonceSizeBytes} B, Tag: {TagSizeBytes} B";
+    public override string ToString()
+    {
+        return $"Provider: {Name}, Key: {KeySizeBytes * 8} bits, " +
+               $"Nonce: {NonceSizeBytes} B, Tag: {TagSizeBytes} B";
+    }
+
+    #endregion
 }

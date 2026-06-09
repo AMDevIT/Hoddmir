@@ -9,90 +9,129 @@ namespace Hoddmir.Storage.Providers;
 public sealed class FileAppendOnlyStoreProvider
     : IAppendOnlyStoreProvider, IAtomicReplace, IAsyncDisposable
 {
-    private readonly string _path;
+    #region Fields
+
+    private readonly string path;
     // Not readonly: swapped after ReplaceWithAsync.
-    private FileStream _fs;
+    private FileStream fs;
     // SemaphoreSlim(1,1) gives async-safe mutual exclusion.
-    private readonly SemaphoreSlim _sem = new(1, 1);
+    private readonly SemaphoreSlim semaphore = new(1, 1);
+
+    #endregion
+
+    #region .ctor
 
     public FileAppendOnlyStoreProvider(string path)
     {
-        _path = path;
+        this.path = path;
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        _fs = OpenStream(path, FileMode.OpenOrCreate);
-        _fs.Position = _fs.Length; // start in append position
+        fs = OpenStream(path, FileMode.OpenOrCreate);
+        fs.Position = fs.Length; // start in append position
     }
+
+    #endregion
+
+    #region Methods
 
     public async Task<long> GetLengthAsync(CancellationToken ct = default)
     {
-        await _sem.WaitAsync(ct).ConfigureAwait(false);
-        try   { return _fs.Length; }
-        finally { _sem.Release(); }
+        await semaphore.WaitAsync(ct).ConfigureAwait(false);
+        try   
+        { 
+            return fs.Length; 
+        }
+        finally 
+        { 
+            semaphore.Release(); 
+        }
     }
 
     public async Task<int> ReadAtAsync(long offset, Memory<byte> buffer, CancellationToken ct = default)
     {
-        await _sem.WaitAsync(ct).ConfigureAwait(false);
+        await semaphore.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            _fs.Position = offset;
-            return await _fs.ReadAsync(buffer, ct).ConfigureAwait(false);
+            fs.Position = offset;
+            return await fs.ReadAsync(buffer, ct).ConfigureAwait(false);
         }
-        finally { _sem.Release(); }
+        finally { semaphore.Release(); }
     }
 
     public async Task AppendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default)
     {
-        await _sem.WaitAsync(ct).ConfigureAwait(false);
-        try   { await _fs.WriteAsync(data, ct).ConfigureAwait(false); }
-        finally { _sem.Release(); }
+        await semaphore.WaitAsync(ct).ConfigureAwait(false);
+        try   { await fs.WriteAsync(data, ct).ConfigureAwait(false); }
+        finally { semaphore.Release(); }
     }
 
     public async Task FlushAsync(bool hard = false, CancellationToken ct = default)
     {
-        await _sem.WaitAsync(ct).ConfigureAwait(false);
-        try   { await _fs.FlushAsync(ct).ConfigureAwait(false); }
-        finally { _sem.Release(); }
+        await semaphore.WaitAsync(ct).ConfigureAwait(false);
+        try   { await fs.FlushAsync(ct).ConfigureAwait(false); }
+        finally { semaphore.Release(); }
     }
 
     public async Task ReplaceWithAsync(Func<Stream, Task> buildNew, CancellationToken ct = default)
     {
-        string temp = _path + ".tmp";
+        string temp = path + ".tmp";
 
-        await using (var outFs = new FileStream(temp, FileMode.Create, FileAccess.ReadWrite,
-                         FileShare.None, 4096,
-                         FileOptions.Asynchronous | FileOptions.WriteThrough | FileOptions.SequentialScan))
+        await using (FileStream outFs = new (temp, 
+                                             FileMode.Create, 
+                                             FileAccess.ReadWrite,
+                                             FileShare.None, 
+                                             4096,
+                                             FileOptions.Asynchronous | FileOptions.WriteThrough | FileOptions.SequentialScan))
         {
             await buildNew(outFs).ConfigureAwait(false);
             await outFs.FlushAsync(ct).ConfigureAwait(false);
         }
 
-        await _sem.WaitAsync(ct).ConfigureAwait(false);
+        await semaphore.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            await _fs.FlushAsync(ct).ConfigureAwait(false);
-            await _fs.DisposeAsync().ConfigureAwait(false);
+            await fs.FlushAsync(ct).ConfigureAwait(false);
+            await fs.DisposeAsync().ConfigureAwait(false);
 
             // Atomic rename on NTFS and POSIX
-            File.Replace(temp, _path, _path + ".bak", ignoreMetadataErrors: true);
-            TryDelete(_path + ".bak");
+            File.Replace(temp, path, path + ".bak", ignoreMetadataErrors: true);
+            TryDelete(path + ".bak");
 
-            _fs = OpenStream(_path, FileMode.Open);
-            _fs.Position = _fs.Length;
+            fs = OpenStream(path, FileMode.Open);
+            fs.Position = fs.Length;
         }
-        finally { _sem.Release(); }
+        finally { semaphore.Release(); }
     }
 
     private static FileStream OpenStream(string path, FileMode mode) =>
         new(path, mode, FileAccess.ReadWrite, FileShare.None, 4096,
             FileOptions.Asynchronous | FileOptions.WriteThrough | FileOptions.RandomAccess);
 
-    private static void TryDelete(string p) { try { File.Delete(p); } catch { /* best effort */ } }
+    private static void TryDelete(string p) 
+    { 
+        try 
+        { 
+            File.Delete(p); 
+        } 
+        catch
+        { 
+            /* best effort */ 
+        } 
+    }
 
     public async ValueTask DisposeAsync()
     {
-        await _sem.WaitAsync().ConfigureAwait(false);
-        try   { await _fs.DisposeAsync().ConfigureAwait(false); }
-        finally { _sem.Release(); _sem.Dispose(); }
+        await semaphore.WaitAsync().ConfigureAwait(false);
+
+        try   
+        { 
+            await fs.DisposeAsync().ConfigureAwait(false); 
+        }
+        finally 
+        { 
+            semaphore.Release(); 
+            semaphore.Dispose(); 
+        }
     }
+
+    #endregion
 }

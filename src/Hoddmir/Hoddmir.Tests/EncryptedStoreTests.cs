@@ -16,11 +16,9 @@ public sealed class EncryptedStoreTests
     private static readonly byte[] Password = Encoding.UTF8.GetBytes("test-password");
 
     // Fast fixed Argon2id params to keep tests quick
-    private static readonly IArgon2idParamsProvider FastArgon =
-        new FixedArgon2idParamsProvider(new Argon2idParams(32 * 1024, 2, 2));
+    private static readonly IArgon2idParamsProvider FastArgon = new FixedArgon2idParamsProvider(new Argon2idParams(32 * 1024, 2, 2));
 
-    private static Task<EncryptedEntryStore> CreateStoreAsync(
-        MemoryAppendOnlyStoreProvider ms, IAEADProvider aead) =>
+    private static Task<EncryptedEntryStore> CreateStoreAsync(MemoryAppendOnlyStoreProvider ms, IAEADProvider aead) =>
         EncryptedEntryStore.Configure()
             .WithPassword(Password)
             .WithArgon2id(FastArgon)
@@ -331,7 +329,7 @@ public sealed class EncryptedStoreTests
         await store.DisposeAsync();
     }
 
-    // ── Providers ────────────────────────────────────────────────────────────
+    #region Providers
 
     private static IEnumerable<object[]> Providers() =>
     [
@@ -339,4 +337,6 @@ public sealed class EncryptedStoreTests
         [new AesCtrHmacSha256Provider()],
         [new ChaCha20Poly1305Provider()],
     ];
+
+    #endregion
 }

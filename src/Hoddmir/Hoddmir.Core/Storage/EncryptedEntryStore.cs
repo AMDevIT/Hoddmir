@@ -66,7 +66,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     private readonly IAEADProvider _aead;
     // Not readonly: RotateDekAsync replaces these in-place after a successful key rotation.
     private SensitiveBytes _dek;
-    private SensitiveBytes _noncePrefix;
+    private SensitiveBytes noncePrefix;
 
     private long _nextSeq;
     private readonly ConcurrentDictionary<string, IndexEntry> _index = new(StringComparer.Ordinal);
@@ -90,12 +90,12 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         _replacer = replacer;
         _aead = aead;
         _dek = new SensitiveBytes(32);
-        _noncePrefix = new SensitiveBytes(NoncePrefixLen);
+        this.noncePrefix = new SensitiveBytes(NoncePrefixLen);
         _logger = logger;
         _nextSeq = nextSeq;
 
         dek.AsSpan().CopyTo(_dek.AsSpan());
-        noncePrefix.AsSpan().CopyTo(_noncePrefix.AsSpan());
+        noncePrefix.AsSpan().CopyTo(this.noncePrefix.AsSpan());
 
         CryptographicOperations.ZeroMemory(dek);
         CryptographicOperations.ZeroMemory(noncePrefix);
@@ -210,12 +210,22 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             int read = await _store.ReadAtAsync(idx.Offset, seg, ct).ConfigureAwait(false);
             if (read != idx.TotalLen) return null;
 
-            if (!TryParseRecord(seg, out byte op, out long seq, out int keyLen, out int ctLen,
-                                out byte[] nonce, out byte[] keyBytes, out byte[] ctBuf, out byte[] tag))
+            if (!TryParseRecord(seg, 
+                                out byte op, 
+                                out long seq, 
+                                out int keyLen, 
+                                out int ctLen,
+                                out byte[] nonce, 
+                                out byte[] keyBytes, 
+                                out byte[] ctBuf, 
+                                out byte[] tag))
                 return null;
 
-            if (op != 0) return null;
-            if (!string.Equals(Encoding.UTF8.GetString(keyBytes), id, StringComparison.Ordinal)) return null;
+            if (op != 0) 
+                return null;
+
+            if (!string.Equals(Encoding.UTF8.GetString(keyBytes), id, StringComparison.Ordinal)) 
+                return null;
 
             Span<byte> aad = BuildAad(op, seq, keyLen, ctLen);
             byte[] pt = new byte[ctLen];
@@ -341,7 +351,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _dek.Dispose();
-        _noncePrefix.Dispose();
+        noncePrefix.Dispose();
         await _store.FlushAsync(true).ConfigureAwait(false);
     }
 
@@ -432,7 +442,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
 
         // Swap in-memory key material only after the file has been safely written.
         SensitiveBytes oldDek = _dek;
-        SensitiveBytes oldNoncePrefix = _noncePrefix;
+        SensitiveBytes oldNoncePrefix = noncePrefix;
 
         var freshDek = new SensitiveBytes(32);
         var freshPrefix = new SensitiveBytes(NoncePrefixLen);
@@ -440,7 +450,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         newNoncePrefix.AsSpan().CopyTo(freshPrefix.AsSpan());
 
         _dek = freshDek;
-        _noncePrefix = freshPrefix;
+        noncePrefix = freshPrefix;
 
         // Zero and dispose old key material.
         oldDek.Dispose();
@@ -463,7 +473,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     private byte[] BuildNonce(long seq)
     {
         byte[] n = new byte[GCMNonceLen];
-        _noncePrefix.AsSpan().CopyTo(n.AsSpan(0, NoncePrefixLen));
+        noncePrefix.AsSpan().CopyTo(n.AsSpan(0, NoncePrefixLen));
         BinaryPrimitives.WriteUInt32BigEndian(n.AsSpan(NoncePrefixLen, 4), (uint)seq);
         return n;
     }
@@ -578,8 +588,13 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         return aad;
     }
 
-    private static void SerializeRecord(byte[] buf, byte op, long seq,
-                                        byte[] nonce, byte[] keyBytes, byte[] ct, byte[] tag)
+    private static void SerializeRecord(byte[] buf, 
+                                        byte op, 
+                                        long seq,
+                                        byte[] nonce, 
+                                        byte[] keyBytes, 
+                                        byte[] ct, 
+                                        byte[] tag)
     {
         int off = 0;
         buf[off++] = op;
@@ -593,13 +608,23 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     }
 
     private bool TryParseRecord(ArraySegment<byte> seg,
-                                 out byte op, out long seq, out int keyLen, out int ctLen,
-                                 out byte[] nonce, out byte[] keyBytes, out byte[] ctBuf, out byte[] tag)
+                                out byte op, 
+                                out long seq, 
+                                out int keyLen, 
+                                out int ctLen,
+                                out byte[] nonce, 
+                                out byte[] keyBytes, 
+                                out byte[] ctBuf, 
+                                out byte[] tag)
     {
-        op = 0; seq = 0; keyLen = 0; ctLen = 0;
+        op = 0; 
+        seq = 0; 
+        keyLen = 0; 
+        ctLen = 0;
         nonce = []; keyBytes = []; ctBuf = []; tag = [];
 
-        if (seg.Count < RecordFixedPrefixLen) return false;
+        if (seg.Count < RecordFixedPrefixLen) 
+            return false;
 
         int off = seg.Offset;
         op = seg.Array![off++];
@@ -610,11 +635,18 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         int nonceLen = _aead.NonceSizeBytes;
         int tagLen = _aead.TagSizeBytes;
 
-        if (seg.Count < RecordFixedPrefixLen + nonceLen + keyLen + ctLen + tagLen) return false;
+        if (seg.Count < RecordFixedPrefixLen + nonceLen + keyLen + ctLen + tagLen)
+            return false;
 
-        nonce = seg.Array.AsSpan(off, nonceLen).ToArray(); off += nonceLen;
-        keyBytes = seg.Array.AsSpan(off, keyLen).ToArray(); off += keyLen;
-        ctBuf = seg.Array.AsSpan(off, ctLen).ToArray(); off += ctLen;
+        nonce = seg.Array.AsSpan(off, nonceLen).ToArray(); 
+        off += nonceLen;
+
+        keyBytes = seg.Array.AsSpan(off, keyLen).ToArray(); 
+        off += keyLen;
+
+        ctBuf = seg.Array.AsSpan(off, ctLen).ToArray(); 
+        off += ctLen;
+
         tag = seg.Array.AsSpan(off, tagLen).ToArray();
         return true;
     }
