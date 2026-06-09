@@ -52,7 +52,8 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     private const int FixedHeaderSize = 4 + 1 + 1 + 1 + 4; // MAGIC+VER+KeyMode+AeadId+HeaderLen
     private const int GCMNonceLen = 12;
     private const int GCMTagLen = 16;
-    private const int NoncePrefixLen = 8;
+    // private const int NoncePrefixLen = 8; 
+    private const int NoncePrefixLen = 4;
     private const int RecordFixedPrefixLen = 1 + 8 + 4 + 4; // Op+Seq+KeyLen+CtLen
     private const int DefaultMemBufDim = 512;
     private const int DefaultPbkdf2Iters = 600_000;
@@ -61,16 +62,16 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
 
     #region Fields
 
-    private readonly IAppendOnlyStoreProvider _store;
-    private readonly IAtomicReplace _replacer;
-    private readonly IAEADProvider _aead;
+    private readonly IAppendOnlyStoreProvider store;
+    private readonly IAtomicReplace replacer;
+    private readonly IAEADProvider aead;
     // Not readonly: RotateDekAsync replaces these in-place after a successful key rotation.
-    private SensitiveBytes _dek;
+    private SensitiveBytes dek;
     private SensitiveBytes noncePrefix;
 
-    private long _nextSeq;
-    private readonly ConcurrentDictionary<string, IndexEntry> _index = new(StringComparer.Ordinal);
-    private readonly ILogger? _logger;
+    private long nextSeq;
+    private readonly ConcurrentDictionary<string, IndexEntry> index = new(StringComparer.Ordinal);
+    private readonly ILogger? logger;
 
     private record struct IndexEntry(long Seq, long Offset, int TotalLen, bool Deleted);
 
@@ -86,15 +87,15 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
                                 long nextSeq,
                                 ILogger? logger)
     {
-        _store = store;
-        _replacer = replacer;
-        _aead = aead;
-        _dek = new SensitiveBytes(32);
+        this.store = store;
+        this.replacer = replacer;
+        this.aead = aead;
+        this.dek = new SensitiveBytes(32);
         this.noncePrefix = new SensitiveBytes(NoncePrefixLen);
-        _logger = logger;
-        _nextSeq = nextSeq;
+        this.logger = logger;
+        this.nextSeq = nextSeq;
 
-        dek.AsSpan().CopyTo(_dek.AsSpan());
+        dek.AsSpan().CopyTo(this.dek.AsSpan());
         noncePrefix.AsSpan().CopyTo(this.noncePrefix.AsSpan());
 
         CryptographicOperations.ZeroMemory(dek);
@@ -169,7 +170,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             throw new ArgumentException("Entry ID must not be empty.", nameof(id));
 
         byte[] keyBytes = Encoding.UTF8.GetBytes(id);
-        long seq = Interlocked.Increment(ref _nextSeq);
+        long seq = Interlocked.Increment(ref nextSeq);
         byte[] nonce = BuildNonce(seq);
         const byte op = 0;
 
@@ -178,17 +179,17 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         byte[] ct_buf = new byte[value.Length];
         byte[] tag = new byte[GCMTagLen];
 
-        _aead.Encrypt(_dek.AsSpan(), nonce, aad, value.Span, ct_buf, tag);
+        aead.Encrypt(dek.AsSpan(), nonce, aad, value.Span, ct_buf, tag);
 
         int total = RecordFixedPrefixLen + GCMNonceLen + keyBytes.Length + ct_buf.Length + GCMTagLen;
         byte[] buf = ArrayPool<byte>.Shared.Rent(total);
         try
         {
             SerializeRecord(buf, op, seq, nonce, keyBytes, ct_buf, tag);
-            long offset = await _store.GetLengthAsync(ct).ConfigureAwait(false);
-            await _store.AppendAsync(buf.AsMemory(0, total), ct).ConfigureAwait(false);
-            await _store.FlushAsync(true, ct).ConfigureAwait(false);
-            _index[id] = new IndexEntry(seq, offset, total, Deleted: false);
+            long offset = await store.GetLengthAsync(ct).ConfigureAwait(false);
+            await store.AppendAsync(buf.AsMemory(0, total), ct).ConfigureAwait(false);
+            await store.FlushAsync(true, ct).ConfigureAwait(false);
+            index[id] = new IndexEntry(seq, offset, total, Deleted: false);
         }
         finally
         {
@@ -200,14 +201,14 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     /// <summary>Decrypts and returns the value for <paramref name="id"/>, or <c>null</c> if not found or deleted.</summary>
     public async Task<byte[]?> GetAsync(string id, CancellationToken ct = default)
     {
-        if (!_index.TryGetValue(id, out var idx) || idx.Deleted)
+        if (!index.TryGetValue(id, out var idx) || idx.Deleted)
             return null;
 
         byte[] rented = ArrayPool<byte>.Shared.Rent(idx.TotalLen);
         try
         {
             var seg = new ArraySegment<byte>(rented, 0, idx.TotalLen);
-            int read = await _store.ReadAtAsync(idx.Offset, seg, ct).ConfigureAwait(false);
+            int read = await store.ReadAtAsync(idx.Offset, seg, ct).ConfigureAwait(false);
             if (read != idx.TotalLen) return null;
 
             if (!TryParseRecord(seg, 
@@ -231,7 +232,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             byte[] pt = new byte[ctLen];
             try
             {
-                if (!_aead.Decrypt(_dek.AsSpan(), nonce, aad, ctBuf, tag, pt))
+                if (!aead.Decrypt(dek.AsSpan(), nonce, aad, ctBuf, tag, pt))
                     return null;
                 CryptographicOperations.ZeroMemory(aad);
                 return pt;
@@ -253,14 +254,14 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         if (string.IsNullOrEmpty(id)) return;
 
         byte[] keyBytes = Encoding.UTF8.GetBytes(id);
-        long seq = Interlocked.Increment(ref _nextSeq);
+        long seq = Interlocked.Increment(ref nextSeq);
         byte[] nonce = BuildNonce(seq);
         const byte op = 1;
 
         Span<byte> aad = BuildAad(op, seq, keyBytes.Length, 0);
         byte[] tag = new byte[GCMTagLen];
 
-        _aead.Encrypt(_dek.AsSpan(), nonce, aad, ReadOnlySpan<byte>.Empty, Span<byte>.Empty, tag);
+        aead.Encrypt(dek.AsSpan(), nonce, aad, ReadOnlySpan<byte>.Empty, Span<byte>.Empty, tag);
         CryptographicOperations.ZeroMemory(aad);
 
         int total = RecordFixedPrefixLen + GCMNonceLen + keyBytes.Length + GCMTagLen;
@@ -268,10 +269,10 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         try
         {
             SerializeRecord(buf, op, seq, nonce, keyBytes, [], tag);
-            long offset = await _store.GetLengthAsync(ct).ConfigureAwait(false);
-            await _store.AppendAsync(buf.AsMemory(0, total), ct).ConfigureAwait(false);
-            await _store.FlushAsync(true, ct).ConfigureAwait(false);
-            _index[id] = new IndexEntry(seq, offset, total, Deleted: true);
+            long offset = await store.GetLengthAsync(ct).ConfigureAwait(false);
+            await store.AppendAsync(buf.AsMemory(0, total), ct).ConfigureAwait(false);
+            await store.FlushAsync(true, ct).ConfigureAwait(false);
+            index[id] = new IndexEntry(seq, offset, total, Deleted: true);
         }
         finally
         {
@@ -281,7 +282,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
 
     /// <summary>Returns all live (non-deleted) entry IDs.</summary>
     public IReadOnlyCollection<string> ListIds() =>
-        [.. _index.Where(kv => !kv.Value.Deleted).Select(kv => kv.Key)];
+        [.. index.Where(kv => !kv.Value.Deleted).Select(kv => kv.Key)];
 
     /// <summary>
     /// Rewrites the store keeping only live entries, renewing their nonces and sequence numbers.
@@ -289,14 +290,14 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     /// </summary>
     public async Task CompactAsync(CancellationToken ct = default)
     {
-        await _replacer.ReplaceWithAsync(async stream =>
+        await replacer.ReplaceWithAsync(async stream =>
         {
             // 1. Copy header unchanged
-            await CopyHeaderAsync(_store, stream, ct).ConfigureAwait(false);
+            await CopyHeaderAsync(store, stream, ct).ConfigureAwait(false);
 
             // 2. Re-encrypt live records with fresh nonces
             long newSeq = 0;
-            foreach (string id in _index.Where(kv => !kv.Value.Deleted).Select(kv => kv.Key))
+            foreach (string id in index.Where(kv => !kv.Value.Deleted).Select(kv => kv.Key))
             {
                 byte[]? pt = await GetAsync(id, ct).ConfigureAwait(false);
                 if (pt is null) continue;
@@ -307,14 +308,14 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
                 const byte op = 0;
 
                 byte[] ctBuf = new byte[pt.Length];
-                byte[] tag = new byte[_aead.TagSizeBytes];
+                byte[] tag = new byte[aead.TagSizeBytes];
 
                 Span<byte> aad = BuildAad(op, seq, keyBytes.Length, ctBuf.Length);
 
-                byte[] tmpDek = _dek.ToManagedCopy();
+                byte[] tmpDek = dek.ToManagedCopy();
                 try
                 {
-                    _aead.Encrypt(tmpDek, nonce, aad, pt, ctBuf, tag);
+                    aead.Encrypt(tmpDek, nonce, aad, pt, ctBuf, tag);
                 }
                 finally
                 {
@@ -325,22 +326,22 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
                 int total = RecordFixedPrefixLen + nonce.Length + keyBytes.Length + ctBuf.Length + tag.Length;
                 byte[] recBuf = new byte[total];
                 SerializeRecord(recBuf, op, seq, nonce, keyBytes, ctBuf, tag);
-                await stream.WriteAsync(recBuf, 0, total, ct).ConfigureAwait(false);
+                await stream.WriteAsync(recBuf.AsMemory(0, total), ct).ConfigureAwait(false);
             }
 
             await stream.FlushAsync(ct).ConfigureAwait(false);
         }, ct).ConfigureAwait(false);
 
         // 3. Rebuild in-memory index
-        byte[] dekCopy = _dek.ToManagedCopy();
+        byte[] dekCopy = dek.ToManagedCopy();
         try
         {
-            _index.Clear();
-            _nextSeq = await RebuildIndexAsync(_store, ct).ConfigureAwait(false);
+            index.Clear();
+            nextSeq = await RebuildIndexAsync(store, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger?.LogDebug(ex, "Error rebuilding index after compaction.");
+            this.logger?.LogDebug(ex, "Error rebuilding index after compaction.");
         }
         finally
         {
@@ -348,11 +349,164 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         }
     }
 
+    // VerifyAsync — da aggiungere nella region #region Public API
+    // di EncryptedEntryStore.cs
+
+    /// <summary>
+    /// Verifies the structural and cryptographic integrity of every record in the store.
+    /// <para>
+    /// For each record, the method reconstructs the AAD and nonce from the plaintext
+    /// prefix, then attempts decryption. If the Poly1305 tag does not match, the record
+    /// is reported as corrupted. Plaintext is never retained — the decrypted buffer is
+    /// zeroed immediately after tag verification.
+    /// </para>
+    /// <para>
+    /// This is a health/diagnostic check, not a security boundary. Any tampering that
+    /// would allow an attacker to read data would already be caught by the tag at
+    /// <see cref="GetAsync"/> time. <see cref="VerifyAsync"/> is useful for detecting
+    /// silent disk corruption, incomplete writes, or truncated backups.
+    /// </para>
+    /// </summary>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A <see cref="VerifyResult"/> describing the outcome for every record.</returns>
+    public async Task<VerifyResult> VerifyAsync(CancellationToken ct = default)
+    {
+        long pos = await HeaderEndOffsetAsync(store, ct).ConfigureAwait(false);
+        long fileLen = await store.GetLengthAsync(ct).ConfigureAwait(false);
+
+        int total = 0;
+        int valid = 0;
+        int corrupted = 0;
+        int truncated = 0;
+        var corruptedKeys = new List<string>();
+        var truncatedOffsets = new List<long>();
+
+        byte[] prefix = new byte[RecordFixedPrefixLen];
+        int nonceLen = aead.NonceSizeBytes;
+        int tagLen = aead.TagSizeBytes;
+
+        while (pos < fileLen)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            // --- 1. Read fixed prefix ---
+            int got = await store.ReadAtAsync(pos, prefix, ct).ConfigureAwait(false);
+
+            if (got == 0) 
+                break;
+
+            if (got != prefix.Length)
+            {
+                truncated++;
+                truncatedOffsets.Add(pos);
+                if (this.logger?.IsEnabled(LogLevel.Warning) == true)
+                    this.logger.LogWarning("Truncated record prefix at offset {Offset}: expected {Expected} bytes, got {Got}.",
+                                           pos, 
+                                           prefix.Length, 
+                                           got);
+                break;
+            }
+
+            byte op = prefix[0];
+            long seq = BinaryPrimitives.ReadInt64LittleEndian(prefix.AsSpan(1, 8));
+            int keyLen = BinaryPrimitives.ReadInt32LittleEndian(prefix.AsSpan(9, 4));
+            int ctLen = BinaryPrimitives.ReadInt32LittleEndian(prefix.AsSpan(13, 4));
+
+            // --- 2. Basic sanity checks (before any allocation) ---
+            if (keyLen < 0 || ctLen < 0 || op > 1)
+            {
+                corrupted++;
+                truncatedOffsets.Add(pos);
+                if (this.logger?.IsEnabled (LogLevel.Warning) == true)
+                    this.logger.LogWarning("Record at offset {Offset} has invalid fields: Op={Op} KeyLen={KeyLen} CtLen={CtLen}.",
+                                           pos, 
+                                           op, 
+                                           keyLen, 
+                                           ctLen);
+                break; // Cannot determine record length — stop scanning.
+            }
+
+            int restLen = nonceLen + keyLen + ctLen + tagLen;
+            byte[] rest = new byte[restLen];
+
+            got = await store.ReadAtAsync(pos + prefix.Length, rest, ct).ConfigureAwait(false);
+            if (got != restLen)
+            {
+                truncated++;
+                truncatedOffsets.Add(pos);
+                logger?.LogWarning(
+                    "Truncated record body at offset {Offset}: expected {Expected} bytes, got {Got}.",
+                    pos, restLen, got);
+                break;
+            }
+
+            // --- 3. Extract fields ---
+
+            byte[] nonce = rest.AsSpan(0, nonceLen).ToArray();
+            int keyOff = nonceLen;
+            string key = Encoding.UTF8.GetString(rest, keyOff, keyLen);
+            int ctOff = keyOff + keyLen;
+            byte[] ctBuf = rest.AsSpan(ctOff, ctLen).ToArray();
+            byte[] tag = rest.AsSpan(ctOff + ctLen, tagLen).ToArray();
+
+            total++;
+
+            // --- 4. Cryptographic verification ---
+
+            byte[] aad = BuildAad(op, seq, keyLen, ctLen);
+            byte[] pt = new byte[ctLen];
+            bool tagOk;
+
+            try
+            {
+                tagOk = aead.Decrypt(dek.AsSpan(), nonce, aad, ctBuf, tag, pt);
+            }
+            catch (CryptographicException)
+            {
+                tagOk = false;
+            }
+            finally
+            {
+                // Never retain plaintext — zero immediately regardless of outcome.
+                CryptographicOperations.ZeroMemory(pt);
+                CryptographicOperations.ZeroMemory(aad);
+            }
+
+            if (tagOk)
+            {
+                valid++;
+                if (this.logger?.IsEnabled(LogLevel.Debug) == true)
+                    this.logger.LogDebug("Record '{Key}' (seq={Seq}) OK.", key, seq);
+            }
+            else
+            {
+                corrupted++;
+                corruptedKeys.Add(key);
+                if (this.logger?.IsEnabled(LogLevel.Warning) == true)
+                    this.logger.LogWarning("Record '{Key}' (seq={Seq}, offset={Offset}) failed tag verification — corrupted or tampered.",
+                                           key,
+                                           seq, 
+                                           pos);
+            }
+
+            pos += prefix.Length + restLen;
+        }
+
+        VerifyResult result = new (TotalRecords: total,
+                                   ValidRecords: valid,
+                                   CorruptedRecords: corrupted,
+                                   TruncatedRecords: truncated,
+                                   CorruptedKeys: corruptedKeys.AsReadOnly(),
+                                   TruncatedOffsets: truncatedOffsets.AsReadOnly());
+        return result;
+    }
+  
+   
     public async ValueTask DisposeAsync()
     {
-        _dek.Dispose();
+        dek.Dispose();
         noncePrefix.Dispose();
-        await _store.FlushAsync(true).ConfigureAwait(false);
+        await store.FlushAsync(true).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -400,7 +554,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     {
         // Read the current mode from the on-disk header so we can validate the
         // current password and know which mode to inherit if newMode is null.
-        KeyProtectionMode currentMode = await ReadModeFromHeaderAsync(_store, ct)
+        KeyProtectionMode currentMode = await ReadModeFromHeaderAsync(store, ct)
                                              .ConfigureAwait(false);
 
         // Authenticate caller: verify they know the current password before rotating.
@@ -415,11 +569,11 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             // If the password is wrong, ReadHeaderAsync will fail to authenticate the AEAD tag
             // and return garbage — we detect this by comparing with the live DEK.
             (byte[] candidateDek, byte[] _) = await ReadHeaderAsync(
-                _store, _aead, currentMode, currentPasswordUtf8, new ArgonKeyProvider(), ct)
+                store, aead, currentMode, currentPasswordUtf8, new ArgonKeyProvider(), ct)
                 .ConfigureAwait(false);
 
             bool dekMatches = CryptographicOperations.FixedTimeEquals(
-                candidateDek.AsSpan(), _dek.AsSpan());
+                candidateDek.AsSpan(), dek.AsSpan());
 
             CryptographicOperations.ZeroMemory(candidateDek);
 
@@ -441,7 +595,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
              .ConfigureAwait(false);
 
         // Swap in-memory key material only after the file has been safely written.
-        SensitiveBytes oldDek = _dek;
+        SensitiveBytes oldDek = dek;
         SensitiveBytes oldNoncePrefix = noncePrefix;
 
         var freshDek = new SensitiveBytes(32);
@@ -449,7 +603,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         newDek.AsSpan().CopyTo(freshDek.AsSpan());
         newNoncePrefix.AsSpan().CopyTo(freshPrefix.AsSpan());
 
-        _dek = freshDek;
+        dek = freshDek;
         noncePrefix = freshPrefix;
 
         // Zero and dispose old key material.
@@ -459,10 +613,10 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         CryptographicOperations.ZeroMemory(newNoncePrefix);
 
         // Rebuild index from the newly written store.
-        _index.Clear();
-        _nextSeq = await RebuildIndexAsync(_store, ct).ConfigureAwait(false);
+        index.Clear();
+        nextSeq = await RebuildIndexAsync(store, ct).ConfigureAwait(false);
 
-        _logger?.LogDebug("DEK rotation completed successfully.");
+        logger?.LogDebug("DEK rotation completed successfully.");
     }
 
     #endregion
@@ -472,36 +626,36 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     // Builds a 12-byte nonce: NoncePrefix(8) || seq(4, big-endian).
     private byte[] BuildNonce(long seq)
     {
-        byte[] n = new byte[GCMNonceLen];
-        noncePrefix.AsSpan().CopyTo(n.AsSpan(0, NoncePrefixLen));
-        BinaryPrimitives.WriteUInt32BigEndian(n.AsSpan(NoncePrefixLen, 4), (uint)seq);
+        byte[] n = new byte[GCMNonceLen]; // 12 byte
+        noncePrefix.AsSpan().CopyTo(n.AsSpan(0, NoncePrefixLen)); // 4 byte prefix
+        BinaryPrimitives.WriteUInt64BigEndian(n.AsSpan(NoncePrefixLen, 8), (ulong)seq); // 8 byte counter
         return n;
     }
 
-    // Overload used during RewriteWithNewKeyAsync, before _noncePrefix is swapped.
+    // Overload used during RewriteWithNewKeyAsync, before noncePrefix is swapped.
     private static byte[] BuildNonce(byte[] noncePrefix, long seq)
     {
         byte[] n = new byte[GCMNonceLen];
         noncePrefix.AsSpan(0, NoncePrefixLen).CopyTo(n.AsSpan(0, NoncePrefixLen));
-        BinaryPrimitives.WriteUInt32BigEndian(n.AsSpan(NoncePrefixLen, 4), (uint)seq);
+        BinaryPrimitives.WriteUInt64BigEndian(n.AsSpan(NoncePrefixLen, 8), (ulong)seq);
         return n;
     }
 
     // Rewrites the entire store atomically using a new DEK and nonce prefix.
     // Used by both RotateDekAsync and (in future) any operation that needs a full rekey.
-    [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", "CA1416",
-        Justification = "DPAPI path is guarded by OperatingSystem.IsWindows()")]
-    private async Task RewriteWithNewKeyAsync(
-        byte[] newDek,
-        byte[] newNoncePrefix,
-        KeyProtectionMode mode,
-        byte[] passwordUtf8,
-        IArgon2idParamsProvider? argonParams,
-        CancellationToken ct)
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Interoperability", 
+                                                     "CA1416",
+                                                     Justification = "DPAPI path is guarded by OperatingSystem.IsWindows()")]
+    private async Task RewriteWithNewKeyAsync(byte[] newDek,
+                                              byte[] newNoncePrefix,
+                                              KeyProtectionMode mode,
+                                              byte[] passwordUtf8,
+                                              IArgon2idParamsProvider? argonParams,
+                                              CancellationToken ct)
     {
         // Snapshot the live plaintext values of all entries before touching the file.
         // We must read them now while the old DEK is still active.
-        var liveIds = _index.Where(kv => !kv.Value.Deleted)
+        var liveIds = index.Where(kv => !kv.Value.Deleted)
                             .Select(kv => kv.Key)
                             .ToArray();
 
@@ -513,11 +667,11 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
                 snapshots.Add((id, pt));
         }
 
-        await _replacer.ReplaceWithAsync(async stream =>
+        await replacer.ReplaceWithAsync(async stream =>
         {
             // 1. Write new header with new DEK and new NoncePrefix
             using var ms = new MemoryStream(DefaultMemBufDim);
-            WriteHeader(ms, newDek, newNoncePrefix, mode, _aead, passwordUtf8,
+            WriteHeader(ms, newDek, newNoncePrefix, mode, aead, passwordUtf8,
                         argonParams, new ArgonKeyProvider());
             byte[] hdrBytes = ms.ToArray();
             await stream.WriteAsync(hdrBytes, ct).ConfigureAwait(false);
@@ -532,12 +686,12 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
                 const byte op = 0;
 
                 byte[] ctBuf = new byte[pt.Length];
-                byte[] tag = new byte[_aead.TagSizeBytes];
+                byte[] tag = new byte[aead.TagSizeBytes];
                 byte[] aad = BuildAad(op, seq, keyBytes.Length, ctBuf.Length);
 
                 try
                 {
-                    _aead.Encrypt(newDek, nonce, aad, pt, ctBuf, tag);
+                    aead.Encrypt(newDek, nonce, aad, pt, ctBuf, tag);
                 }
                 finally
                 {
@@ -632,8 +786,8 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         keyLen = BinaryPrimitives.ReadInt32LittleEndian(seg.Array.AsSpan(off, 4)); off += 4;
         ctLen = BinaryPrimitives.ReadInt32LittleEndian(seg.Array.AsSpan(off, 4)); off += 4;
 
-        int nonceLen = _aead.NonceSizeBytes;
-        int tagLen = _aead.TagSizeBytes;
+        int nonceLen = aead.NonceSizeBytes;
+        int tagLen = aead.TagSizeBytes;
 
         if (seg.Count < RecordFixedPrefixLen + nonceLen + keyLen + ctLen + tagLen)
             return false;
@@ -660,8 +814,8 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         long maxSeq = 0;
 
         byte[] prefix = new byte[RecordFixedPrefixLen];
-        int nonceLen = _aead.NonceSizeBytes;
-        int tagLen = _aead.TagSizeBytes;
+        int nonceLen = aead.NonceSizeBytes;
+        int tagLen = aead.TagSizeBytes;
 
         while (pos < fileLen)
         {
@@ -691,9 +845,9 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             pos += total;
         }
 
-        _index.Clear();
+        index.Clear();
         foreach (var kv in newIndex)
-            _index[kv.Key] = kv.Value;
+            index[kv.Key] = kv.Value;
 
         return maxSeq;
     }
@@ -773,7 +927,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             var instance = new EncryptedEntryStore(store, replacer, aead, dek, noncePrefix, 0, logger);
 
             long nextSeq = await instance.RebuildIndexAsync(store, ct).ConfigureAwait(false);
-            instance._nextSeq = nextSeq;
+            instance.nextSeq = nextSeq;
 
             CryptographicOperations.ZeroMemory(dek);
             CryptographicOperations.ZeroMemory(noncePrefix);
