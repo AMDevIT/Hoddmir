@@ -120,7 +120,7 @@ namespace Hoddmir.Tests.ConsoleApp
                 Task<EncryptedEntryStore> openedEncryptedStore = EncryptedEntryStore
                                                               .Configure()
                                                               .WithPassword(passwordBytes)
-                                                              .WithArgon2id(argonProvider)
+                                                              .WithDekArgon2id(argonProvider)
                                                               .WithAead(aead)
                                                               .OpenAsync(store,
                                                                          atomicReplace,

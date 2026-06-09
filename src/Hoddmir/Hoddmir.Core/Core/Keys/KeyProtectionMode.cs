@@ -1,14 +1,15 @@
 namespace Hoddmir.Keys;
 
-/// <summary>Determines how the Data Encryption Key (DEK) is protected in the store header.</summary>
+/// <summary>
+/// Determines how the Data Encryption Key (DEK) is protected in the store header.
+/// </summary>
+/// <remarks>
+/// Only Argon2id is supported in the current format (v0x04).
+/// Platform-specific modes (Windows Hello TPM, Apple Secure Enclave) will be
+/// added as optional extension libraries in future releases.
+/// </remarks>
 public enum KeyProtectionMode : byte
 {
-    /// <summary>Windows Data Protection API (DPAPI) — Windows only.</summary>
-    WindowsDPAPI      = 0,
-
-    /// <summary>PBKDF2-HMAC-SHA-256 with 600 000 iterations.</summary>
-    PasswordPBKDF2    = 1,
-
-    /// <summary>Argon2id (recommended). Parameters are calibrated or fixed at store creation.</summary>
-    PasswordArgon2id  = 2,
+    /// <summary>Argon2id key derivation. The only supported mode in v0x04.</summary>
+    PasswordArgon2id = 0,
 }
