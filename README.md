@@ -296,7 +296,7 @@ Record:
   int64  Seq      (little-endian)
   int32  KeyLen
   int32  CtLen
-  12B    Nonce    = NoncePrefix(8) || Seq_BE(4)
+  12B    Nonce    = NoncePrefix(4) || Seq_BE(8)
   KeyLen Key      (UTF-8, plaintext)
   CtLen  Ct
   16B    Tag
