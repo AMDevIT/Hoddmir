@@ -302,7 +302,7 @@ public sealed class EncryptedStoreTests
         Trace.WriteLine($"Provider: {aead}");
 
         const int FixedHdrSize      = 4 + 1 + 1 + 1 + 4;
-        const int NoncePrefixLen    = 8;
+        const int NoncePrefixLen    = 4;
 
         async Task<byte[]> ReadNoncePrefix(MemoryAppendOnlyStoreProvider ms)
         {
