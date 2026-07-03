@@ -234,7 +234,11 @@ public sealed class AesCtrHmacSha256Provider
                                   Span<byte> output)
     {
         using Aes aes = Aes.Create();
-        aes.Mode    = CipherMode.ECB;
+
+#pragma warning disable CA5358 // ECB encrypts unique counter blocks only — standard CTR construction
+        aes.Mode = CipherMode.ECB;
+#pragma warning restore CA5358
+
         aes.Padding = PaddingMode.None;
         aes.Key     = kenc.ToArray();
 

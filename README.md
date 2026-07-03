@@ -1,7 +1,7 @@
 # Hoddmir
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%209.0-purple)](https://dotnet.microsoft.com)
+[![.NET](https://img.shields.io/badge/.NET-9.0%20%7C%2010.0-purple)](https://dotnet.microsoft.com)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20iOS%20%7C%20Android-lightgrey)]()
 
 **Hoddmir** is a portable, offline-first encrypted blob storage library for .NET.
@@ -65,17 +65,27 @@ All three algorithms are verified against published test vectors: RFC 8439 (ChaC
 
 ### DEK protection
 
-The DEK is wrapped in the store header using your chosen `KeyProtectionMode`:
+The DEK is wrapped in the store header using **Argon2id** (the only supported mode in v0x04).
 
-| Mode | Notes |
-|---|---|
-| **`PasswordArgon2id`** *(recommended)* | Argon2id KDF. Parameters auto-calibrated to ~500 ms on the current device at store creation. |
-| **`PasswordPBKDF2`** | PBKDF2-HMAC-SHA-256 with 600 000 iterations. |
-| **`WindowsDPAPI`** | OS account identity. Windows only. |
+Two independent Argon2id derivations protect the store:
+
+| Derivation | Purpose | Parameters |
+|---|---|---|
+| **Session KEK** | Encrypts the entire header blob | `password + salt(on-disk) + sessionIterations(caller) + SessionMemKiB=64MiB(hardcoded)` |
+| **DEK KEK** | Encrypts the DEK inside the header | `password + DekArgonSalt(in header) + DekArgonParams(in header)` |
+
+The DEK KEK parameters are stored inside the encrypted header and can be rotated independently. Session parameters (`sessionIterations`, `sessionSaltLen`) are never stored on disk — they form part of the credentials required to open the store.
+
+> **Platform-specific modes** (Windows Hello TPM, Apple Secure Enclave) are planned as optional extension packages. `WindowsDPAPI` and `PasswordPBKDF2` from v0x03 have been removed.
 
 ### Nonce safety
 
-Nonces are `NoncePrefix (8 random bytes, fixed per store) ‖ Seq (4 bytes, big-endian)`. Uniqueness is mathematically guaranteed for up to ~4 billion writes per store — no birthday-bound collision risk regardless of how many records you write.
+Two independent nonce schemes are used:
+
+- **Record prefix nonce:** `Token[0..12]` — 12 bytes of CSPRNG entropy unique per record. No shared component between records.
+- **Payload nonce:** `NoncePrefix(4, fixed per store) ‖ Seq_BE(8)` — uniqueness guaranteed by the monotonic `uint64` sequence counter for up to 2⁶⁴ writes per store.
+
+Both schemes eliminate nonce reuse by construction.
 
 ### Memory safety
 
@@ -115,6 +125,9 @@ var fileStore = new FileAppendOnlyStoreProvider("vault.bin");
 await using var store = await EncryptedEntryStore.Configure()
     .WithPassword(Encoding.UTF8.GetBytes("my-strong-password"))
     .WithAead(new ChaCha20Poly1305Provider())   // from Hoddmir.BouncyCastle
+    // Optional: override session credentials (must match on every reopen)
+    // .WithSessionIterations(3)
+    // .WithSessionSaltLength(32)
     .OpenAsync(fileStore, fileStore);
 
 // Store a blob
@@ -132,6 +145,11 @@ var imageKeys = keys.Where(k => k.StartsWith("images/"));
 
 // Delete a blob
 await store.DeleteAsync("config/api-key");
+
+// Verify integrity of all records (non-destructive)
+VerifyResult result = await store.VerifyAsync();
+if (!result.IsHealthy)
+    Console.WriteLine(result); // "Store UNHEALTHY: 1/5 OK, 1 corrupted, 0 truncated."
 ```
 
 ### In-memory store (testing or transient use)
@@ -188,7 +206,7 @@ var argonParams = new FixedArgon2idParamsProvider(
 
 await using var store = await EncryptedEntryStore.Configure()
     .WithPassword(passwordBytes)
-    .WithArgon2id(argonParams)
+    .WithDekArgon2id(argonParams)
     .WithAead(new ChaCha20Poly1305Provider())
     .OpenAsync(fileStore, fileStore);
 ```
@@ -198,14 +216,21 @@ await using var store = await EncryptedEntryStore.Configure()
 Rotate the DEK at any time without closing the store. All live blobs are re-encrypted with a fresh key and a new nonce prefix atomically. The current password must be provided to authenticate the rotation.
 
 ```csharp
-// Rotate, keeping the same password
+// Rotate DEK, keeping the same password
 await store.RotateDekAsync(
     currentPasswordUtf8: Encoding.UTF8.GetBytes("my-strong-password"));
 
-// Rotate and change the password at the same time
+// Rotate DEK and change the password at the same time
 await store.RotateDekAsync(
     currentPasswordUtf8: Encoding.UTF8.GetBytes("old-password"),
     newPasswordUtf8:     Encoding.UTF8.GetBytes("new-stronger-password"));
+
+// Rotate DEK and change session parameters (all three credentials change)
+await store.RotateDekAsync(
+    currentPasswordUtf8: Encoding.UTF8.GetBytes("old-password"),
+    newPasswordUtf8:     Encoding.UTF8.GetBytes("new-password"),
+    newSessionIters:     4,
+    newSessionSaltLen:   64);
 ```
 
 ### Compaction
@@ -260,10 +285,10 @@ This is the expected threat model summary:
 | File at rest, device off | ✅ Very high | AES-256 / ChaCha20-Poly1305 — no known practical attack |
 | File at rest, store closed, device on | ✅ Very high | No DEK in memory — equivalent to VeraCrypt with a dismounted volume |
 | Password brute force | ✅ High | Depends on password strength and Argon2id cost |
-| Forensic file analysis without memory | ✅ High | Strong cryptography; magic number `EES1` is not in common forensic signature databases |
+| Forensic file analysis without memory | ✅ Very high | Fully opaque format — no magic bytes, no plaintext structure, statistically indistinguishable from random noise |
 | Memory forensics, store open | 🟡 Medium | DEK lives in the process during an open session — structural limitation of managed runtimes |
 | Swap / pagefile during active session | 🟡 Medium | OS may page process memory to disk; not controllable from managed code without kernel privileges |
-| Key name confidentiality | 🟡 Partial | Blob values are encrypted; key names are stored in plaintext in the record |
+| Key name confidentiality | ✅ High | Blob keys are stored only in the encrypted index record; not visible in plaintext on disk |
 | Nation-state, device off or store closed | ✅ Very high | No memory to dump — same posture as VeraCrypt with a dismounted volume |
 | Nation-state, store open on a live device | 🔴 Low | DEK is in memory; memory forensics, cold boot, or hypervisor introspection become viable |
 
@@ -275,38 +300,73 @@ This is the expected threat model summary:
 
 **Memory forensics is the main exposure.** The DEK is resident in process memory for the duration of an open store session. A memory dump of the process (`ProcDump`, `WinPmem`, OS crash dump) can expose the DEK even with `SensitiveBytes` and `ZeroMemory` in place. This is a structural limitation of .NET managed runtimes — the JIT and GC can materialise intermediate values in registers or on the stack before zeroing occurs. VeraCrypt mitigates this using kernel drivers and non-pageable memory; Hoddmir cannot do this without elevated privileges.
 
-**Key names are plaintext.** An investigator without the password cannot read blob values, but can observe which keys exist, how many records are present, and the write timeline. If key name confidentiality is required, use opaque keys (e.g. an HMAC of the logical name).
+**Key names are encrypted.** As of v0x04, record IDs are stored only in the encrypted index record — they do not appear in plaintext on disk. An investigator without the password cannot observe key names, values, or the number of records. The write timeline (number of records written over time) can still be inferred from file size growth if the attacker has access to successive snapshots of the file.
 
 **The real attack surface at nation-state level is never the ciphertext.** Keyloggers, compromised devices, supply chain attacks, and coercive access to the password are the practical vectors. No cryptographic library protects against these — Hoddmir included.
 
-**What would raise the bar further.** Two additions would meaningfully improve forensic resistance without changing the public API: encrypting key names (replacing plaintext keys with a deterministic HMAC in the record), and deriving the DEK fresh from the password on each operation rather than keeping it resident in memory. Both come at a performance cost and are not necessary for Hoddmir's primary use case as an application-level blob store.
+**What would raise the bar further.** The main remaining exposure for forensic resistance is keeping the DEK resident in memory for the duration of an open store session. Deriving the DEK fresh from the password on each operation would eliminate this — at a significant performance cost. This is not necessary for Hoddmir's primary use case as an application-level blob store.
 
 ---
 
 ## File format
 
-Store files are identified by the magic bytes `EES1` and are versioned. The current version is `0x03`.
+The current version is `0x04`. The file is **fully opaque** — there are no plaintext magic bytes, no visible structure, and no identifiable headers. The file is statistically indistinguishable from random noise.
+
+### On-disk layout
 
 ```
-Header:
-  [MAGIC(4)="EES1"][VER(1)=0x03][KeyMode(1)][AeadId(1)][HeaderLen(4)][ModePayload][NoncePrefix(8)]
-
-Record:
-  byte   Op       (0=Put, 1=Delete)
-  int64  Seq      (little-endian)
-  int32  KeyLen
-  int32  CtLen
-  12B    Nonce    = NoncePrefix(4) || Seq_BE(8)
-  KeyLen Key      (UTF-8, plaintext)
-  CtLen  Ct
-  16B    Tag
-  
-AAD = Op(1) || Seq(8,LE) || KeyLen(4,LE) || CtLen(4,LE)
+[Salt(SessionSaltLen)]
+[EncryptedHeaderBlob(512 bytes)]
+[Record...]
 ```
 
-The `AeadId` byte in the fixed header causes Hoddmir to detect and reject a provider mismatch at open time, giving a clear `InvalidOperationException` instead of a silent authentication failure on every record.
+The salt length is a caller-controlled credential (default 16 bytes, max 256). Everything after the salt is encrypted with the session KEK.
 
-> **Note:** blob keys are stored in plaintext in the record. An attacker with access to the file but not the password cannot read blob values, but can observe key names, record count, and write frequency. If key name confidentiality is required for your use case, use opaque keys (e.g. a hash of the logical name).
+### Header plaintext (decrypted, padded to 496 bytes with random data)
+
+```
+Magic(4)="EES1" | Ver(1)=0x04 | AeadId(1)
+NoncePrefix(4)  | IndexToken(16)
+DekNonce(12)    | EncDek(32)   | DekTag(16)
+DekArgonSalt(16)| DekArgonMemKiB(4) | DekArgonIters(4) | DekArgonPar(4)
+```
+
+### Record layout (all fields opaque from outside)
+
+```
+[EncPrefix(45)]    — encrypted 29-byte prefix + 16-byte tag
+[Token(16)]        — random opaque handle
+[PaddedCt(var)]    — encrypted payload + random padding
+[PayloadTag(16)]   — AEAD tag over EncPrefix + PaddedCt
+```
+
+EncPrefix plaintext (29 bytes):
+```
+PreNoise(4) | Op(1) | Seq(8,LE) | KeyLen(4,LE) | CtLen(4,LE) | PaddedCtLen(4,LE) | PostNoise(4)
+```
+
+Payload plaintext:
+```
+keyBytes(KeyLen) || value(CtLen-KeyLen) || random_padding(PaddedCtLen-CtLen)
+```
+
+The `AeadId` and all key material are inside the encrypted header. Attempting to open a store with the wrong AEAD provider or wrong credentials fails immediately.
+
+### Encrypted index
+
+Every write appends a data record followed by an **encrypted index record**. The index maps opaque token hex strings to human-readable IDs. Record IDs never appear in plaintext on disk. `ListIds()` returns IDs from the in-memory map populated at open time.
+
+### Credentials
+
+Opening a store requires three independent values:
+
+| Credential | Default | Notes |
+|---|---|---|
+| `password` | — (required) | Raw UTF-8 bytes |
+| `sessionIterations` | `2` | Argon2id iterations for the header KEK |
+| `sessionSaltLen` | `16` | Length of the random salt at the start of the file |
+
+All three must match. The salt length and session iterations are **never stored on disk** — they are part of the credentials.
 
 ---
 
