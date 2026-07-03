@@ -1,0 +1,58 @@
+name: "CodeQL Advanced (dotNET 10)"
+
+on: workflow_dispatch
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: csharp
+            build-mode: manual
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          # L'SDK 10 compila anche net9.0, ma qui builderemo solo net10.0
+          dotnet-version: 10.0.x
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended,security-and-quality
+
+      - name: Build (manual, net10.0 only)
+        if: matrix.build-mode == 'manual'
+        shell: bash
+        run: |
+          set -e
+          TARGET=$(git ls-files '*.sln' | head -n 1)
+          if [ -z "$TARGET" ]; then
+            TARGET=$(git ls-files '*.csproj' | head -n 1)
+          fi
+          if [ -z "$TARGET" ]; then
+            echo "No .sln or .csproj found in the repository"; exit 1
+          fi
+          echo "Building: $TARGET"
+
+          dotnet restore "$TARGET"
+          dotnet build "$TARGET" -c Release -f net10.0 --no-restore /p:UseSharedCompilation=false
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
