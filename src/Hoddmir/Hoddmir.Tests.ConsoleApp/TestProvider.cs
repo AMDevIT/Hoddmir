@@ -35,6 +35,103 @@ namespace Hoddmir.Tests.ConsoleApp
 
         #region Methods
 
+        /// <summary>Exercises the encrypted file store from creation through password rotation and reopen.</summary>
+        public async Task VerifyFileStoreLifecycleAsync(CancellationToken cancellationToken = default)
+        {
+            const string key = "keep";
+            const string deletedKey = "remove";
+            const string reopenedKey = "added-after-reopen";
+            const string rotatedKey = "added-after-rotation";
+            const string rotatedPassword = "rotated-test-password123.";
+            string path = Path.Combine(Path.GetTempPath(), $"hoddmir-lifecycle-{Guid.NewGuid():N}.dat");
+            byte[] initialValue = "initial value"u8.ToArray();
+            byte[] firstUpdate = "updated in the first session"u8.ToArray();
+            byte[] secondUpdate = "updated after reopening"u8.ToArray();
+            byte[] temporaryValue = "temporary value"u8.ToArray();
+            byte[] reopenedValue = "written after reopening"u8.ToArray();
+            byte[] rotatedValue = "written after rotation"u8.ToArray();
+            AesGcmBouncyCastleProvider reopenAead = new();
+            IAEADProvider createAead = AesGcm.IsSupported ? new AesGcmProvider() : reopenAead;
+
+            try
+            {
+                Console.WriteLine($"Creating the test store with {createAead.Name}.");
+                await using (FileAppendOnlyStoreProvider backend = new(path))
+                await using (EncryptedEntryStore store = await CreateStoreAsync(backend, createAead, TestPassword,
+                                                                                fastArgon, cancellationToken))
+                {
+                    await store.PutAsync(key, initialValue, cancellationToken);
+                    await store.PutAsync(deletedKey, temporaryValue, cancellationToken);
+                    await VerifyValueAsync(store, key, initialValue, cancellationToken);
+                    await store.PutAsync(key, firstUpdate, cancellationToken);
+                }
+
+                Console.WriteLine($"Reopening with {reopenAead.Name} to append, update, delete and compact.");
+                await using (FileAppendOnlyStoreProvider backend = new(path))
+                await using (EncryptedEntryStore store = await CreateStoreAsync(backend, reopenAead, TestPassword,
+                                                                                fastArgon, cancellationToken))
+                {
+                    await VerifyStoreAsync(store, 3, cancellationToken, (key, firstUpdate), (deletedKey, temporaryValue));
+                    await store.PutAsync(reopenedKey, reopenedValue, cancellationToken);
+                    await store.PutAsync(key, secondUpdate, cancellationToken);
+                    await store.DeleteAsync(deletedKey, cancellationToken);
+                    if (await store.GetAsync(deletedKey, cancellationToken) is not null)
+                        throw new InvalidDataException("The deleted key is still readable.");
+
+                    await VerifyStoreAsync(store, 6, cancellationToken, (key, secondUpdate), (reopenedKey, reopenedValue));
+                    await store.CompactAsync(cancellationToken);
+                    await VerifyStoreAsync(store, 2, cancellationToken, (key, secondUpdate), (reopenedKey, reopenedValue));
+
+                    Console.WriteLine("Rotating the data key and changing the password.");
+                    await store.RotateDekAsync(Encoding.UTF8.GetBytes(TestPassword),
+                                               newPasswordUtf8: Encoding.UTF8.GetBytes(rotatedPassword),
+                                               newDekArgonParams: fastArgon,
+                                               ct: cancellationToken);
+                }
+
+                await using (FileAppendOnlyStoreProvider backend = new(path))
+                {
+                    try
+                    {
+                        await using EncryptedEntryStore unexpectedStore = await CreateStoreAsync(backend, reopenAead,
+                                                                                                 TestPassword, fastArgon,
+                                                                                                 cancellationToken);
+                        throw new InvalidDataException("The previous password still opens the rotated store.");
+                    }
+                    catch (CryptographicException)
+                    {
+                        Console.WriteLine("The previous password was rejected.");
+                    }
+
+                    await using EncryptedEntryStore store = await CreateStoreAsync(backend, reopenAead, rotatedPassword,
+                                                                                   fastArgon, cancellationToken);
+                    await VerifyStoreAsync(store, 2, cancellationToken, (key, secondUpdate), (reopenedKey, reopenedValue));
+
+                    Console.WriteLine("Appending and deleting after reopening with the new password.");
+                    await store.PutAsync(rotatedKey, rotatedValue, cancellationToken);
+                    await store.DeleteAsync(reopenedKey, cancellationToken);
+                }
+
+                Console.WriteLine("Reopening to verify the final state.");
+                await using (FileAppendOnlyStoreProvider backend = new(path))
+                await using (EncryptedEntryStore store = await CreateStoreAsync(backend, reopenAead, rotatedPassword,
+                                                                                fastArgon, cancellationToken))
+                {
+                    await VerifyStoreAsync(store, 4, cancellationToken, (key, secondUpdate), (rotatedKey, rotatedValue));
+                    if (await store.GetAsync(deletedKey, cancellationToken) is not null ||
+                        await store.GetAsync(reopenedKey, cancellationToken) is not null)
+                        throw new InvalidDataException("A deleted key was restored after reopening.");
+                }
+
+                Console.WriteLine("File store lifecycle passed.");
+            }
+            finally
+            {
+                File.Delete(path);
+                File.Delete(path + ".lock");
+            }
+        }
+
         public async Task CreateTestStoreAsync(bool useFastArgon = false, 
                                                CancellationToken cancellationToken = default)
         {
@@ -106,6 +203,30 @@ namespace Hoddmir.Tests.ConsoleApp
                 };
                 await store.PutAsync(key, Encoding.UTF8.GetBytes(data), cancellationToken);
             }
+        }
+
+        /// <summary>Checks that the stored bytes match the expected value.</summary>
+        private static async Task VerifyValueAsync(EncryptedEntryStore store, string key, byte[] expectedValue,
+                                                   CancellationToken cancellationToken)
+        {
+            byte[]? actualValue = await store.GetAsync(key, cancellationToken);
+            if (actualValue is null || !actualValue.AsSpan().SequenceEqual(expectedValue))
+                throw new InvalidDataException($"Unexpected value for key '{key}'.");
+        }
+
+        /// <summary>Checks the expected active values and the authenticated record count.</summary>
+        private static async Task VerifyStoreAsync(EncryptedEntryStore store, int recordCount, CancellationToken cancellationToken,
+                                                   params (string Key, byte[] Value)[] expectedEntries)
+        {
+            if (store.ListIds().Count != expectedEntries.Length)
+                throw new InvalidDataException($"Expected {expectedEntries.Length} active keys.");
+
+            foreach ((string key, byte[] value) in expectedEntries)
+                await VerifyValueAsync(store, key, value, cancellationToken);
+
+            VerifyResult result = await store.VerifyAsync(cancellationToken);
+            if (!result.IsHealthy || result.TotalRecords != recordCount)
+                throw new InvalidDataException($"Expected {recordCount} valid records. {result}");
         }
 
         private static Task<EncryptedEntryStore> CreateStoreAsync(IAppendOnlyStoreProvider store, 

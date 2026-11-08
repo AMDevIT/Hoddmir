@@ -3,6 +3,7 @@ using Hoddmir.Core.Keys;
 using Hoddmir.Memory;
 using Microsoft.Extensions.Logging;
 using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 
 namespace Hoddmir.Storage;
@@ -12,7 +13,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
 {
     #region Const
 
-    private const uint InternalMagic = 0x31455345; // EES1, visible only after decryption.
+    private const uint InternalMagic = 0x31534545; // EES1, visible only after decryption.
     private const byte Version = 0x01;
     private const int EncryptedHeaderSize = 512;
     private const int NonceLength = 12;
@@ -29,11 +30,15 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     private const int SessionParallelism = 2;
     private const int DefaultSessionIterations = 2;
     private const int DefaultSessionSaltLength = 16;
+    private const int MaxDekMemoryKiB = 512 * 1024;
+    private const int MaxDekIterations = 10;
+    private const int MaxDekParallelism = 16;
 
     #endregion
 
     #region Fields
 
+    private static readonly ConditionalWeakTable<IAppendOnlyStoreProvider, SemaphoreSlim> BackendLeases = new();
     private readonly IAppendOnlyStoreProvider store;
     private readonly IAtomicReplace replacer;
     private readonly IAEADProvider aead;
@@ -41,8 +46,11 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     private readonly EncryptedRecordCodec codec;
     private readonly ILogger? logger;
     private readonly SemaphoreSlim gate = new(1, 1);
+    private readonly SemaphoreSlim backendLease;
 
     private SensitiveBytes dek;
+    private byte[] validatedHeader;
+    private byte[] endDigest;
     private Dictionary<string, IndexEntry> index = new(StringComparer.Ordinal);
     private int sessionSaltLength;
     private int sessionIterations;
@@ -56,8 +64,9 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     #region .ctor
 
     private EncryptedEntryStore(IAppendOnlyStoreProvider store, IAtomicReplace replacer, IAEADProvider aead,
-                                IArgonKeyProvider argonKeyProvider, SensitiveBytes dek, int sessionSaltLength,
-                                int sessionIterations, ILogger? logger)
+                                IArgonKeyProvider argonKeyProvider, SensitiveBytes dek, byte[] validatedHeader,
+                                int sessionSaltLength, int sessionIterations, ILogger? logger,
+                                SemaphoreSlim backendLease)
     {
         this.store = store;
         this.replacer = replacer;
@@ -65,10 +74,13 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         this.argonKeyProvider = argonKeyProvider;
         this.codec = new(aead);
         this.dek = dek;
+        this.validatedHeader = validatedHeader;
+        this.backendLease = backendLease;
         this.sessionSaltLength = sessionSaltLength;
         this.sessionIterations = sessionIterations;
         this.logger = logger;
-        this.endOffset = sessionSaltLength + EncryptedHeaderSize;
+        this.endOffset = validatedHeader.Length;
+        this.endDigest = SHA256.HashData(validatedHeader);
     }
 
     #endregion
@@ -85,7 +97,8 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         return this.AppendRecordAsync(id, value, deleted: false, ct);
     }
 
-    /// <summary>Returns the current value or null if it is absent or cannot be read.</summary>
+    /// <summary>Returns the current value or null if the ID is absent.</summary>
+    /// <exception cref="InvalidDataException">The indexed record no longer matches the authenticated log.</exception>
     public async Task<byte[]?> GetAsync(string id, CancellationToken ct = default)
     {
         await this.gate.WaitAsync(ct).ConfigureAwait(false);
@@ -115,6 +128,20 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         finally { this.gate.Release(); }
     }
 
+    /// <summary>Returns the committed log checkpoint for storage in a trusted location.</summary>
+    public async Task<byte[]> GetCheckpointAsync(CancellationToken ct = default)
+    {
+        await this.gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            this.EnsureUsable();
+            if (this.incompleteTail)
+                throw new InvalidDataException("Recover the incomplete tail before obtaining a checkpoint.");
+            return (byte[])this.endDigest.Clone();
+        }
+        finally { this.gate.Release(); }
+    }
+
     /// <summary>Atomically rewrites the active records and removes any incomplete tail.</summary>
     public async Task CompactAsync(CancellationToken ct = default)
     {
@@ -122,23 +149,31 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         try
         {
             this.EnsureUsable();
-            byte[] header = new byte[this.sessionSaltLength + EncryptedHeaderSize];
-            if (!await EncryptedRecordCodec.ReadExactlyAsync(this.store, 0, header, ct).ConfigureAwait(false))
+            byte[]? header = await ReadHeaderBytesAsync(this.store, this.sessionSaltLength, ct).ConfigureAwait(false);
+            if (header is null)
                 throw new InvalidDataException("Incomplete store header.");
+            if (!header.AsSpan().SequenceEqual(this.validatedHeader))
+                throw new InvalidDataException("The store header changed after opening.");
 
-            await this.RewriteAsync(header, this.dek, ct).ConfigureAwait(false);
+            await this.ValidateRewriteSourceAsync(ct).ConfigureAwait(false);
+            await this.RewriteAsync(this.validatedHeader, this.dek, ct).ConfigureAwait(false);
         }
         finally { this.gate.Release(); }
     }
 
-    /// <summary>Authenticates the records and reports corruption or truncation.</summary>
+    /// <summary>Checks the header and authenticates the records, reporting corruption or truncation.</summary>
     public async Task<VerifyResult> VerifyAsync(CancellationToken ct = default)
     {
         await this.gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             this.EnsureUsable();
-            return await this.ScanAsync(rebuildIndex: false, ct).ConfigureAwait(false);
+            byte[]? header = await ReadHeaderBytesAsync(this.store, this.sessionSaltLength, ct).ConfigureAwait(false);
+            if (header is null)
+                return new(0, 0, 0, 1, [], [0L]);
+
+            VerifyResult result = await this.ScanAsync(rebuildIndex: false, ct).ConfigureAwait(false);
+            return result with { IsHeaderCorrupted = !header.AsSpan().SequenceEqual(this.validatedHeader) };
         }
         finally { this.gate.Release(); }
     }
@@ -164,9 +199,14 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             int targetSaltLength = newSessionSaltLen ?? this.sessionSaltLength;
             ValidateSessionParameters(targetIterations, targetSaltLength);
 
-            using SensitiveBytes currentDek = await ReadHeaderAsync(this.store, this.aead, this.argonKeyProvider,
-                                                                    currentPasswordUtf8, this.sessionIterations,
-                                                                    this.sessionSaltLength, ct).ConfigureAwait(false);
+            byte[] currentHeader = await ReadHeaderBytesAsync(this.store, this.sessionSaltLength, ct).ConfigureAwait(false)
+                ?? throw new InvalidDataException("Incomplete store header.");
+            if (!currentHeader.AsSpan().SequenceEqual(this.validatedHeader))
+                throw new InvalidDataException("The store header changed after opening.");
+
+            await this.ValidateRewriteSourceAsync(ct).ConfigureAwait(false);
+            using SensitiveBytes currentDek = DecryptHeader(currentHeader, this.aead, this.argonKeyProvider,
+                                                            currentPasswordUtf8, this.sessionIterations, this.sessionSaltLength);
             if (!CryptographicOperations.FixedTimeEquals(currentDek.AsSpan(), this.dek.AsSpan()))
                 throw new CryptographicException("Current password is incorrect. Key rotation aborted.");
 
@@ -206,7 +246,8 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             this.disposed = true;
             this.dek.Dispose();
             this.index.Clear();
-            await this.store.FlushAsync(true).ConfigureAwait(false);
+            try { await this.store.FlushAsync(true).ConfigureAwait(false); }
+            finally { this.backendLease.Release(); }
         }
         finally { this.gate.Release(); }
     }
@@ -216,42 +257,61 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
                                                                  IAEADProvider aead, byte[] passwordUtf8, int sessionIterations,
                                                                  int sessionSaltLength, IArgon2idParamsProvider? dekArgonParams,
                                                                  IArgonKeyProvider argonKeyProvider, ILogger? logger,
+                                                                 bool? createNew, ReadOnlyMemory<byte> expectedCheckpoint,
                                                                  CancellationToken ct)
     {
         if (aead.KeySizeBytes != DekLength || aead.NonceSizeBytes != NonceLength || aead.TagSizeBytes != TagLength)
             throw new NotSupportedException("The store requires a 32-byte key, 12-byte nonce and 16-byte tag.");
 
-        bool create = await store.GetLengthAsync(ct).ConfigureAwait(false) == 0;
-        SensitiveBytes dek = create
-            ? CreateDek()
-            : await ReadHeaderAsync(store, aead, argonKeyProvider, passwordUtf8,
-                                    sessionIterations, sessionSaltLength, ct).ConfigureAwait(false);
+        SemaphoreSlim backendLease = BackendLeases.GetValue(store, static _ => new(1, 1));
+        if (!backendLease.Wait(0, ct))
+            throw new InvalidOperationException("This backend is already attached to an open store.");
 
+        SensitiveBytes? dek = null;
         try
         {
-            EncryptedEntryStore instance = new(store, replacer, aead, argonKeyProvider, dek,
-                                               sessionSaltLength, sessionIterations, logger);
-            if (create)
+            bool create = await store.GetLengthAsync(ct).ConfigureAwait(false) == 0;
+            if (createNew == false && create)
+                throw new InvalidDataException("The existing store is empty or missing.");
+            if (createNew == true && !create)
+                throw new IOException("Cannot create a store on a nonempty backend.");
+
+            byte[]? header = create
+                ? null
+                : (await ReadHeaderBytesAsync(store, sessionSaltLength, ct).ConfigureAwait(false)
+                   ?? throw new InvalidDataException("Incomplete header blob."));
+            dek = header is null
+                ? CreateDek()
+                : DecryptHeader(header, aead, argonKeyProvider, passwordUtf8, sessionIterations, sessionSaltLength);
+
+            if (header is null)
             {
-                byte[] header = await CreateHeaderAsync(aead, argonKeyProvider, dek, passwordUtf8, sessionIterations,
-                                                        sessionSaltLength, dekArgonParams, ct).ConfigureAwait(false);
+                header = await CreateHeaderAsync(aead, argonKeyProvider, dek, passwordUtf8, sessionIterations,
+                                                 sessionSaltLength, dekArgonParams, ct).ConfigureAwait(false);
                 ct.ThrowIfCancellationRequested();
                 long offset = await store.AppendAsync(header).ConfigureAwait(false);
                 if (offset != 0)
                     throw new IOException("Store initialization did not start at offset zero.");
                 await store.FlushAsync(true).ConfigureAwait(false);
             }
-            else
+
+            EncryptedEntryStore instance = new(store, replacer, aead, argonKeyProvider, dek, header,
+                                               sessionSaltLength, sessionIterations, logger, backendLease);
+            if (!create)
             {
                 VerifyResult result = await instance.ScanAsync(rebuildIndex: true, ct).ConfigureAwait(false);
                 instance.incompleteTail = result.TruncatedRecords != 0;
+                if (!expectedCheckpoint.IsEmpty &&
+                    !CryptographicOperations.FixedTimeEquals(expectedCheckpoint.Span, instance.endDigest))
+                    throw new InvalidDataException("The store does not match the trusted log checkpoint.");
             }
 
             return instance;
         }
         catch
         {
-            dek.Dispose();
+            dek?.Dispose();
+            backendLease.Release();
             throw;
         }
     }
@@ -267,18 +327,22 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
                 throw new InvalidDataException("Compact the store to remove its incomplete tail before appending.");
 
             long expectedOffset = this.endOffset;
-            byte[] record = this.codec.Encode(this.dek, expectedOffset, id, value.Span, deleted);
+            byte[] record = this.codec.Encode(this.dek, expectedOffset, this.endDigest, id, value.Span, deleted);
+            byte[] digest = SHA256.HashData(record);
             ct.ThrowIfCancellationRequested();
 
             try
             {
+                if (await this.store.GetLengthAsync().ConfigureAwait(false) != expectedOffset)
+                    throw new IOException("The backend length changed before append.");
                 long offset = await this.store.AppendAsync(record).ConfigureAwait(false);
                 if (offset != expectedOffset)
                     throw new IOException("The backend appended at an unexpected offset.");
 
                 await this.store.FlushAsync(true).ConfigureAwait(false);
-                this.UpdateIndex(id, deleted, offset, record.Length);
+                this.UpdateIndex(id, deleted, new(offset, record.Length, this.endDigest, digest));
                 this.endOffset = offset + record.Length;
+                this.endDigest = digest;
             }
             catch
             {
@@ -290,26 +354,29 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     }
 
     /// <summary>Reads the indexed record with the same authenticated codec used by the scanner.</summary>
-    private async Task<byte[]?> ReadValueAsync(string id, IndexEntry entry, CancellationToken ct)
+    private async Task<byte[]> ReadValueAsync(string id, IndexEntry entry, CancellationToken ct)
     {
         EncryptedRecordCodec.RecordRead record = await this.codec.ReadAsync(this.store, this.dek, entry.Offset,
                                                                             entry.Offset + entry.Length,
+                                                                            entry.PreviousDigest,
                                                                             includeValue: true, ct).ConfigureAwait(false);
         if (record.Status == EncryptedRecordCodec.ReadStatus.Valid &&
-            record.Length == entry.Length && StringComparer.Ordinal.Equals(record.Id, id))
-            return record.Value;
+            record.Length == entry.Length && record.Digest.AsSpan().SequenceEqual(entry.Digest) &&
+            StringComparer.Ordinal.Equals(record.Id, id) && !record.Deleted)
+            return record.Value!;
 
         if (record.Value is not null)
             CryptographicOperations.ZeroMemory(record.Value);
 
-        return null;
+        throw new InvalidDataException($"Indexed record at offset 0x{entry.Offset:x} changed or failed authentication.");
     }
 
     /// <summary>Walks authenticated records in file order and optionally rebuilds the active index.</summary>
     private async Task<VerifyResult> ScanAsync(bool rebuildIndex, CancellationToken ct)
     {
-        long position = this.sessionSaltLength + EncryptedHeaderSize;
+        long position = this.validatedHeader.Length;
         long length = await this.store.GetLengthAsync(ct).ConfigureAwait(false);
+        byte[] digest = SHA256.HashData(this.validatedHeader);
         int total = 0;
         int valid = 0;
         List<string> corrupt = [];
@@ -322,7 +389,8 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         {
             ct.ThrowIfCancellationRequested();
             EncryptedRecordCodec.RecordRead record = await this.codec.ReadAsync(this.store, this.dek, position,
-                                                                                length, includeValue: false, ct)
+                                                                                length, digest,
+                                                                                includeValue: false, ct)
                                                                      .ConfigureAwait(false);
 
             if (record.Status == EncryptedRecordCodec.ReadStatus.Truncated)
@@ -340,15 +408,15 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
                 string label = this.index.FirstOrDefault(entry => entry.Value.Offset == position).Key ??
                                $"<unknown@0x{position:x}>";
                 corrupt.Add(label);
-                this.logger?.LogWarning("Record '{Key}' at offset 0x{Offset:x} failed verification.", label, position);
-                if (record.Length == 0)
-                    break;
+                this.logger?.LogWarning("Record at offset 0x{Offset:x} failed verification.", position);
+                break;
             }
             else
             {
                 if (rebuildIndex)
-                    this.UpdateIndex(record.Id!, record.Deleted, position, record.Length);
+                    this.UpdateIndex(record.Id!, record.Deleted, new(position, record.Length, digest, record.Digest!));
 
+                digest = record.Digest!;
                 valid++;
             }
 
@@ -356,9 +424,24 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         }
 
         if (rebuildIndex)
+        {
             this.endOffset = position;
+            this.endDigest = digest;
+        }
 
-        return new(total, valid, corrupt.Count, truncated.Count, corrupt.AsReadOnly(), truncated.AsReadOnly());
+        return new(total, valid, corrupt.Count, truncated.Count, corrupt.AsReadOnly(), truncated.AsReadOnly())
+        {
+            IsLogChanged = !rebuildIndex && corrupt.Count == 0 &&
+                           (position != this.endOffset || !digest.AsSpan().SequenceEqual(this.endDigest))
+        };
+    }
+
+    /// <summary>Rejects rewrites of changed committed data while allowing recovery from an incomplete tail.</summary>
+    private async Task ValidateRewriteSourceAsync(CancellationToken ct)
+    {
+        VerifyResult result = await this.ScanAsync(rebuildIndex: false, ct).ConfigureAwait(false);
+        if (result.CorruptedRecords != 0 || result.IsLogChanged)
+            throw new InvalidDataException("The committed store log is corrupt or has changed after opening.");
     }
 
     /// <summary>Stages a new file and index and publishes both after successful replacement.</summary>
@@ -366,6 +449,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     {
         Dictionary<string, IndexEntry> newIndex = new(StringComparer.Ordinal);
         long offset = header.Length;
+        byte[] digest = SHA256.HashData(header);
         bool staged = false;
         try
         {
@@ -374,15 +458,15 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
                 await stream.WriteAsync(header, ct).ConfigureAwait(false);
                 foreach ((string id, IndexEntry entry) in this.index)
                 {
-                    byte[]? value = await this.ReadValueAsync(id, entry, ct).ConfigureAwait(false);
-                    if (value is null)
-                        throw new InvalidDataException($"Active record at offset 0x{entry.Offset:x} is unreadable.");
+                    byte[] value = await this.ReadValueAsync(id, entry, ct).ConfigureAwait(false);
 
                     try
                     {
-                        byte[] record = this.codec.Encode(targetDek, offset, id, value, deleted: false);
+                        byte[] record = this.codec.Encode(targetDek, offset, digest, id, value, deleted: false);
                         await stream.WriteAsync(record, ct).ConfigureAwait(false);
-                        newIndex.Add(id, new(offset, record.Length));
+                        byte[] previousDigest = digest;
+                        digest = SHA256.HashData(record);
+                        newIndex.Add(id, new(offset, record.Length, previousDigest, digest));
                         offset += record.Length;
                     }
                     finally { CryptographicOperations.ZeroMemory(value); }
@@ -392,24 +476,26 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             },
                                                  ct).ConfigureAwait(false);
         }
-        catch (Exception error) when (staged && error is not OperationCanceledException)
+        catch when (staged)
         {
             this.writeFaulted = true;
             throw;
         }
 
         this.index = newIndex;
+        this.validatedHeader = header;
         this.endOffset = offset;
+        this.endDigest = digest;
         this.incompleteTail = false;
     }
 
     /// <summary>Applies an authenticated mutation to the in-memory index.</summary>
-    private void UpdateIndex(string id, bool deleted, long offset, int length)
+    private void UpdateIndex(string id, bool deleted, IndexEntry entry)
     {
         if (deleted)
             this.index.Remove(id);
         else
-            this.index[id] = new(offset, length);
+            this.index[id] = entry;
     }
 
     /// <summary>Prevents use of a disposed store or one whose last write has an uncertain outcome.</summary>
@@ -444,6 +530,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         Argon2idParams dekParams = parameters is null
             ? new(131_072, 3, 4)
             : await parameters.GetParametersAsync(ct).ConfigureAwait(false);
+        ValidateDekParameters(dekParams);
         ct.ThrowIfCancellationRequested();
 
         byte[] header = new byte[saltLength + EncryptedHeaderSize];
@@ -464,7 +551,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             byte[] dekKek = argonKeyProvider.DeriveKey(password, dekSalt, dekParams);
             try
             {
-                aead.Encrypt(dekKek, plaintext.AsSpan(DekNonceOffset, NonceLength), ReadOnlySpan<byte>.Empty,
+                aead.Encrypt(dekKek, plaintext.AsSpan(DekNonceOffset, NonceLength), "Hoddmir/0x01/dek"u8,
                              dek.AsSpan(), plaintext.AsSpan(WrappedDekOffset, DekLength),
                              plaintext.AsSpan(DekTagOffset, TagLength));
             }
@@ -473,7 +560,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             byte[] sessionKek = argonKeyProvider.DeriveKey(password, salt, new(SessionMemKiB, iterations, SessionParallelism));
             try
             {
-                aead.Encrypt(sessionKek, salt[..NonceLength], ReadOnlySpan<byte>.Empty, plaintext,
+                aead.Encrypt(sessionKek, salt[..NonceLength], "Hoddmir/0x01/header"u8, plaintext,
                              header.AsSpan(saltLength, HeaderPlainLength), header.AsSpan(saltLength + HeaderPlainLength));
             }
             finally { CryptographicOperations.ZeroMemory(sessionKek); }
@@ -483,15 +570,19 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         finally { CryptographicOperations.ZeroMemory(plaintext); }
     }
 
-    /// <summary>Authenticates the header and unwraps its pinned data key.</summary>
-    private static async Task<SensitiveBytes> ReadHeaderAsync(IAppendOnlyStoreProvider store, IAEADProvider aead,
-                                                              IArgonKeyProvider argonKeyProvider, byte[] password,
-                                                              int iterations, int saltLength, CancellationToken ct)
+    /// <summary>Reads the encrypted header or returns null if it is incomplete.</summary>
+    private static async Task<byte[]?> ReadHeaderBytesAsync(IAppendOnlyStoreProvider store, int saltLength, CancellationToken ct)
     {
         byte[] header = new byte[saltLength + EncryptedHeaderSize];
-        if (!await EncryptedRecordCodec.ReadExactlyAsync(store, 0, header, ct).ConfigureAwait(false))
-            throw new InvalidDataException("Incomplete header blob.");
+        return await EncryptedRecordCodec.ReadExactlyAsync(store, 0, header, ct).ConfigureAwait(false)
+            ? header
+            : null;
+    }
 
+    /// <summary>Authenticates the encrypted header and unwraps its pinned data key.</summary>
+    private static SensitiveBytes DecryptHeader(byte[] header, IAEADProvider aead, IArgonKeyProvider argonKeyProvider,
+                                                byte[] password, int iterations, int saltLength)
+    {
         byte[] plaintext = new byte[HeaderPlainLength];
         ReadOnlySpan<byte> salt = header.AsSpan(0, saltLength);
         try
@@ -499,7 +590,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             byte[] sessionKek = argonKeyProvider.DeriveKey(password, salt, new(SessionMemKiB, iterations, SessionParallelism));
             try
             {
-                if (!aead.Decrypt(sessionKek, salt[..NonceLength], ReadOnlySpan<byte>.Empty,
+                if (!aead.Decrypt(sessionKek, salt[..NonceLength], "Hoddmir/0x01/header"u8,
                                   header.AsSpan(saltLength, HeaderPlainLength),
                                   header.AsSpan(saltLength + HeaderPlainLength), plaintext))
                     throw new CryptographicException("Failed to decrypt store header. Check the password, session parameters and AEAD.");
@@ -509,20 +600,21 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             if (BinaryPrimitives.ReadUInt32LittleEndian(plaintext) != InternalMagic)
                 throw new InvalidDataException("Wrong internal magic. Not an EES store or data corrupted.");
             if (plaintext[4] != Version)
-                throw new NotSupportedException($"Store version 0x{plaintext[4]:x2} not supported (expected 0x{Version:x2}).");
+                throw new NotSupportedException($"Store version 0x{plaintext[4]:x2} is not supported.");
             if (plaintext[5] != GetAeadId(aead))
                 throw new InvalidOperationException($"Store AEAD 0x{plaintext[5]:x2} does not match provider '{aead.Name}'.");
 
             Argon2idParams parameters = new(BinaryPrimitives.ReadInt32LittleEndian(plaintext.AsSpan(DekParametersOffset)),
                                             BinaryPrimitives.ReadInt32LittleEndian(plaintext.AsSpan(DekParametersOffset + 4)),
                                             BinaryPrimitives.ReadInt32LittleEndian(plaintext.AsSpan(DekParametersOffset + 8)));
+            ValidateDekParameters(parameters);
             byte[] dekKek = argonKeyProvider.DeriveKey(password, plaintext.AsSpan(DekSaltOffset, DekSaltLength), parameters);
             try
             {
                 SensitiveBytes dek = new(DekLength);
                 try
                 {
-                    if (!aead.Decrypt(dekKek, plaintext.AsSpan(DekNonceOffset, NonceLength), ReadOnlySpan<byte>.Empty,
+                    if (!aead.Decrypt(dekKek, plaintext.AsSpan(DekNonceOffset, NonceLength), "Hoddmir/0x01/dek"u8,
                                       plaintext.AsSpan(WrappedDekOffset, DekLength),
                                       plaintext.AsSpan(DekTagOffset, TagLength), dek.AsSpan()))
                         throw new CryptographicException("Failed to decrypt the store DEK.");
@@ -540,6 +632,15 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         finally { CryptographicOperations.ZeroMemory(plaintext); }
     }
 
+    /// <summary>Bounds the work requested by an authenticated header before invoking Argon2id.</summary>
+    private static void ValidateDekParameters(Argon2idParams parameters)
+    {
+        if (parameters.Parallelism is < 1 or > MaxDekParallelism ||
+            parameters.Iterations is < 1 or > MaxDekIterations ||
+            parameters.MemoryKiB < 8 * parameters.Parallelism || parameters.MemoryKiB > MaxDekMemoryKiB)
+            throw new InvalidDataException("The store's DEK Argon2id parameters are outside the supported bounds.");
+    }
+
     /// <summary>Maps compatible implementations to the persisted algorithm ID.</summary>
     private static byte GetAeadId(IAEADProvider aead) => aead.Name switch
     {
@@ -551,7 +652,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
 
     #endregion
 
-    private readonly record struct IndexEntry(long Offset, int Length);
+    private readonly record struct IndexEntry(long Offset, int Length, byte[] PreviousDigest, byte[] Digest);
 
     /// <summary>Configures the password, derivation parameters and AEAD for a store.</summary>
     public sealed class StoreBuilder
@@ -624,7 +725,33 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
 
         /// <summary>Creates or opens an encrypted store using the configured credentials.</summary>
         public Task<EncryptedEntryStore> OpenAsync(IAppendOnlyStoreProvider store, IAtomicReplace replacer,
-                                                   CancellationToken ct = default)
+                                                   CancellationToken ct = default) =>
+            this.OpenWithModeAsync(store, replacer, createNew: null, default, ct);
+
+        /// <summary>Opens an existing vault and rejects empty or missing content.</summary>
+        public Task<EncryptedEntryStore> OpenExistingAsync(IAppendOnlyStoreProvider store, IAtomicReplace replacer,
+                                                           CancellationToken ct = default) =>
+            this.OpenWithModeAsync(store, replacer, createNew: false, default, ct);
+
+        /// <summary>Opens a vault only if its last complete record matches a trusted checkpoint.</summary>
+        public Task<EncryptedEntryStore> OpenAtCheckpointAsync(IAppendOnlyStoreProvider store, IAtomicReplace replacer,
+                                                               ReadOnlyMemory<byte> expectedCheckpoint,
+                                                               CancellationToken ct = default)
+        {
+            if (expectedCheckpoint.Length != EncryptedRecordCodec.DigestLength)
+                throw new ArgumentException("A checkpoint must contain 32 bytes.", nameof(expectedCheckpoint));
+            return this.OpenWithModeAsync(store, replacer, createNew: false, expectedCheckpoint.ToArray(), ct);
+        }
+
+        /// <summary>Initializes an empty backend and rejects existing content.</summary>
+        public Task<EncryptedEntryStore> CreateAsync(IAppendOnlyStoreProvider store, IAtomicReplace replacer,
+                                                      CancellationToken ct = default) =>
+            this.OpenWithModeAsync(store, replacer, createNew: true, default, ct);
+
+        /// <summary>Validates configuration and opens the backend using the requested mode.</summary>
+        private Task<EncryptedEntryStore> OpenWithModeAsync(IAppendOnlyStoreProvider store, IAtomicReplace replacer,
+                                                           bool? createNew, ReadOnlyMemory<byte> expectedCheckpoint,
+                                                           CancellationToken ct)
         {
             if (this.aead is null)
                 throw new InvalidOperationException("An AEAD provider must be set via WithAead().");
@@ -632,7 +759,8 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
                 throw new InvalidOperationException("A password must be set via WithPassword().");
 
             return OpenCoreAsync(store, replacer, this.aead, this.password, this.sessionIterations, this.sessionSaltLength,
-                                 this.dekArgonParams, this.argonKeyProvider ?? new ArgonKeyProvider(), this.logger, ct);
+                                 this.dekArgonParams, this.argonKeyProvider ?? new ArgonKeyProvider(), this.logger,
+                                 createNew, expectedCheckpoint, ct);
         }
 
         #endregion

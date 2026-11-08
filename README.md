@@ -1,12 +1,11 @@
 # Hoddmir
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![.NET](https://img.shields.io/badge/.NET-9.0%20%7C%2010.0-purple)](https://dotnet.microsoft.com)
-[![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20iOS%20%7C%20Android-lightgrey)]()
 
 **Hoddmir** is a portable, offline-first encrypted blob storage library for .NET.
 
-Think of it as an Azure Blob Storage or Amazon S3 — a flat namespace of arbitrary string keys mapped to arbitrary binary values, with Put / Get / Delete / List — except that every blob is individually encrypted at rest, the entire store is protected by a password, and it runs everywhere .NET runs with zero native dependencies and zero data leaving the device.
+The library maps string keys to binary values and provides put, get, delete and list operations. The built-in backends keep the encrypted data in a local file or in process memory. A password protects access to the store.
 
 ```
 key (string)  →  value (byte[])   encrypted with AES-256-GCM / ChaCha20-Poly1305 / AES-CTR+HMAC
@@ -14,38 +13,11 @@ key (string)  →  value (byte[])   encrypted with AES-256-GCM / ChaCha20-Poly13
 
 ---
 
-## Why Hoddmir?
-
-Most .NET applications that need to store secrets or encrypted blobs end up choosing between:
-
-- **Plain files or SQLite** — fast and portable, but unencrypted.
-- **Platform APIs** (Windows DPAPI, iOS Keychain, Android Keystore) — encrypted, but not cross-platform.
-- **Cloud blob storage** (Azure, S3, GCS) — available everywhere, but requires connectivity, authentication infrastructure, and sends data to third-party servers.
-- **SQLCipher** — encrypted SQLite, powerful, but requires native binaries and SQL overhead.
-- **Volume encryption** (VeraCrypt, LUKS) — strong, but requires kernel drivers, admin privileges, and doesn't work on mobile or in sandboxed processes.
-
-Hoddmir fills the gap: **encrypted, portable, embedded, offline-first**.
-
-| | Hoddmir | Azure Blob | SQLCipher | VeraCrypt |
-|---|---|---|---|---|
-| Encrypted at rest | ✅ | ✅ (server-side) | ✅ | ✅ |
-| Works offline | ✅ | ❌ | ✅ | ✅ |
-| No native dependencies | ✅ | ✅ | ❌ | ❌ |
-| iOS / Android / Unity | ✅ | ✅ | ❌ | ❌ |
-| No data leaves device | ✅ | ❌ | ✅ | ✅ |
-| No admin / kernel rights | ✅ | ✅ | ✅ | ❌ |
-| Embedded in your app | ✅ | ❌ | ✅ | ❌ |
-| Key-value blob model | ✅ | ✅ | ❌ (SQL) | ❌ (filesystem) |
-
----
-
 ## Use cases
 
-- **Credential vault** — store API keys, tokens, passwords, certificates inside a desktop or mobile app.
-- **Offline secrets storage** — device-local encrypted configuration that never touches a server.
-- **Encrypted cache** — cache sensitive API responses locally with individual per-record encryption.
-- **Portable encrypted archive** — a self-contained encrypted file that can be moved between machines and opened with a password, without any installed software beyond your app.
-- **In-process test doubles** — swap the file backend for the in-memory provider in tests, with identical semantics and full encryption.
+- Encrypt application configuration or cached blobs on disk.
+- Move an encrypted archive between compatible applications that share the store credentials and AEAD configuration.
+- Use the in-memory backend for transient data or tests that do not require file I/O.
 
 ---
 
@@ -57,15 +29,15 @@ Each record is encrypted with a 256-bit key derived from the store's **Data Encr
 
 | Algorithm | Notes |
 |---|---|
-| **ChaCha20-Poly1305** *(recommended)* | Fast, no timing side-channels, available on all targets. |
-| **AES-256-GCM** | Requires .NET 9+. |
-| **AES-256-CTR + HMAC-SHA-256** | Encrypt-then-MAC construction. Subkeys derived via HKDF-SHA-256 (RFC 5869). No hardware dependency. |
+| **ChaCha20-Poly1305** | Provided by the Bouncy Castle add-on. |
+| **AES-256-GCM** | Uses the .NET runtime implementation where supported. The Bouncy Castle add-on also provides an explicit AES-GCM implementation. |
+| **AES-256-CTR + HMAC-SHA-256** | Encrypt-then-MAC with HKDF-SHA-256 subkeys. The MAC covers the 64-bit little-endian lengths of the AAD and ciphertext, followed by the AAD, nonce and ciphertext. |
 
-All three algorithms are verified against published test vectors: RFC 8439 (ChaCha20-Poly1305), NIST SP 800-38D (AES-GCM), and RFC 5869 (HKDF-SHA-256).
+The test suite includes published vectors for ChaCha20-Poly1305 (RFC 8439), AES-GCM (NIST SP 800-38D) and HKDF-SHA-256 (RFC 5869). The AES-CTR + HMAC construction has an independently computed test vector.
 
 ### DEK protection
 
-The DEK is wrapped in the store header using **Argon2id** (the only supported mode in v0x01).
+The DEK is wrapped in the store header using **Argon2id**.
 
 Two independent Argon2id derivations protect the store:
 
@@ -74,9 +46,7 @@ Two independent Argon2id derivations protect the store:
 | **Session KEK** | Encrypts the entire header blob | `password + salt(on-disk) + sessionIterations(caller) + SessionMemKiB=64MiB(hardcoded)` |
 | **DEK KEK** | Encrypts the DEK inside the header | `password + DekArgonSalt(in header) + DekArgonParams(in header)` |
 
-The DEK KEK parameters are stored inside the encrypted header and can be rotated independently. Session parameters (`sessionIterations`, `sessionSaltLen`) are never stored on disk — they form part of the credentials required to open the store.
-
-> **Platform-specific modes** (Windows Hello TPM, Apple Secure Enclave) are planned as optional extension packages. `WindowsDPAPI` and `PasswordPBKDF2` from v0x03 have been removed.
+The DEK KEK parameters are stored inside the encrypted header and can be changed during key rotation. Hoddmir accepts up to 512 MiB, 10 iterations and 16 lanes for this derivation, with at least 8 KiB per lane. Callers supply the session parameters (`sessionIterations`, `sessionSaltLen`) each time they open the store. An offline attacker can test a password guess against the outer header tag with one session Argon2id derivation.
 
 ### Nonce safety
 
@@ -84,7 +54,7 @@ Each write or rewrite generates a fresh 32-byte random salt. HKDF-SHA-256 derive
 
 ### Memory safety
 
-The DEK is held in a GC-pinned managed array (`SensitiveBytes`) and cleared on disposal. Temporary record keys and plaintext buffers are cleared after use. The store persists the wrapped DEK.
+The DEK is held in a GC-pinned managed array (`SensitiveBytes`) and cleared on disposal. The record codec also clears its temporary keys and plaintext buffers. The store persists the wrapped DEK.
 
 ---
 
@@ -92,8 +62,8 @@ The DEK is held in a GC-pinned managed array (`SensitiveBytes`) and cleared on d
 
 | Package | Description |
 |---|---|
-| `Hoddmir` | Core library. AES-GCM (.NET 9+), AES-CTR+HMAC (all targets), `EncryptedEntryStore`. |
-| `Hoddmir.BouncyCastle` | Optional add-on. ChaCha20-Poly1305. |
+| `Hoddmir` | Encrypted store, file and memory backends, AES-GCM and AES-CTR + HMAC providers. |
+| `Hoddmir.BouncyCastle` | Optional ChaCha20-Poly1305 and AES-GCM providers backed by Bouncy Castle. |
 
 ---
 
@@ -103,23 +73,23 @@ The DEK is held in a GC-pinned managed array (`SensitiveBytes`) and cleared on d
 
 ```bash
 dotnet add package Hoddmir
-# Recommended: adds ChaCha20-Poly1305
+# Optional: adds the Bouncy Castle AEAD providers
 dotnet add package Hoddmir.BouncyCastle
 ```
 
 ### Basic usage — file-backed store
 
 ```csharp
-using Hoddmir.Encryption;
+using Hoddmir.Core.Encryption.AEAD;
 using Hoddmir.Storage;
 using Hoddmir.Storage.Providers;
 using System.Text;
 
-var fileStore = new FileAppendOnlyStoreProvider("vault.bin");
+await using var fileStore = new FileAppendOnlyStoreProvider("vault.bin");
 
 await using var store = await EncryptedEntryStore.Configure()
     .WithPassword(Encoding.UTF8.GetBytes("my-strong-password"))
-    .WithAead(new ChaCha20Poly1305Provider())   // from Hoddmir.BouncyCastle
+    .WithAead(new AesGcmProvider())
     // Optional: override session credentials (must match on every reopen)
     // .WithSessionIterations(3)
     // .WithSessionSaltLength(32)
@@ -135,24 +105,27 @@ byte[]? blob = await store.GetAsync("config/api-key");
 // List all stored keys
 IReadOnlyCollection<string> keys = store.ListIds();
 
-// List by prefix (manual — ListByPrefixAsync coming in a future version)
-var imageKeys = keys.Where(k => k.StartsWith("images/"));
+// List by prefix
+var imageKeys = keys.Where(k => k.StartsWith("images/", StringComparison.Ordinal));
 
 // Delete a blob
 await store.DeleteAsync("config/api-key");
 
-// Verify integrity of all records (non-destructive)
+// Verify the header and records
 VerifyResult result = await store.VerifyAsync();
 if (!result.IsHealthy)
-    Console.WriteLine(result); // "Store UNHEALTHY: 1/5 OK, 1 corrupted, 0 truncated."
+    Console.WriteLine(result);
 ```
 
 ### In-memory store (testing or transient use)
 
-The in-memory provider is a drop-in replacement for the file provider — same encryption, same API, nothing written to disk.
+The in-memory provider uses the same store API and keeps the encrypted log in memory.
 
 ```csharp
+using Hoddmir.Core.Encryption.AEAD;
+using Hoddmir.Storage;
 using Hoddmir.Storage.Providers;
+using System.Text;
 
 var memStore = new MemoryAppendOnlyStoreProvider();
 
@@ -166,24 +139,26 @@ await store.PutAsync("session/token", Encoding.UTF8.GetBytes("Bearer eyJ..."));
 
 ### Reopen an existing store
 
-Hoddmir stores are persistent. Open the same file with the correct password to access previously written blobs:
+To reopen a store, use the same password, session parameters and a compatible AEAD provider.
+Use `OpenExistingAsync` to reject an empty backend and `CreateAsync` to reject a nonempty one. The file backend keeps a sibling `.lock` file to exclude another writer during file replacement. Keep this lock file in place while any backend for the vault may be open.
 
 ```csharp
-// First session — create and write
-var fileStore = new FileAppendOnlyStoreProvider("vault.bin");
-await using (var store = await EncryptedEntryStore.Configure()
-    .WithPassword(password)
-    .WithAead(new ChaCha20Poly1305Provider())
-    .OpenAsync(fileStore, fileStore))
+// First session
+await using (var fileStore = new FileAppendOnlyStoreProvider("vault.bin"))
 {
+    await using var store = await EncryptedEntryStore.Configure()
+        .WithPassword(password)
+        .WithAead(new AesGcmProvider())
+        .OpenAsync(fileStore, fileStore);
+
     await store.PutAsync("report/q3.pdf", pdfBytes);
 }
 
-// Later session — reopen and read
-var fileStore2 = new FileAppendOnlyStoreProvider("vault.bin");
+// Later session
+await using var fileStore2 = new FileAppendOnlyStoreProvider("vault.bin");
 await using var store2 = await EncryptedEntryStore.Configure()
     .WithPassword(password)
-    .WithAead(new ChaCha20Poly1305Provider())
+    .WithAead(new AesGcmProvider())
     .OpenAsync(fileStore2, fileStore2);
 
 byte[]? pdf = await store2.GetAsync("report/q3.pdf");
@@ -191,18 +166,18 @@ byte[]? pdf = await store2.GetAsync("report/q3.pdf");
 
 ### Fixed Argon2id parameters
 
-The default provider auto-calibrates Argon2id parameters at store creation. For tests or constrained environments (mobile, unit tests), use fixed parameters:
+By default, Argon2id uses 128 MiB, three iterations and parallelism four to wrap the DEK. Pass a parameter provider to customize these settings. `CalibratingArgon2idParamsProvider` is available when you want to calibrate the parameters for a device.
 
 ```csharp
-using Hoddmir.Keys;
+using Hoddmir.Core.Keys;
 
-var argonParams = new FixedArgon2idParamsProvider(
-    new Argon2idParams(MemoryKiB: 64 * 1024, Iterations: 3, Parallelism: 2));
+Argon2idParams parameters = new(MemoryKiB: 64 * 1024, Iterations: 3, Parallelism: 2);
+FixedArgon2idParamsProvider argonParams = new(parameters);
 
 await using var store = await EncryptedEntryStore.Configure()
     .WithPassword(passwordBytes)
     .WithDekArgon2id(argonParams)
-    .WithAead(new ChaCha20Poly1305Provider())
+    .WithAead(new AesGcmProvider())
     .OpenAsync(fileStore, fileStore);
 ```
 
@@ -235,10 +210,12 @@ await store.CompactAsync();
 
 ### Using AEAD providers directly
 
-Hoddmir's AEAD providers can be used independently of the store to encrypt arbitrary blobs:
+Hoddmir's AEAD providers can be used independently of the store to encrypt arbitrary blobs.
 
 ```csharp
-using Hoddmir.Encryption;
+using Hoddmir.Core.Encryption.AEAD;
+using System.Security.Cryptography;
+using System.Text;
 
 var provider = new AesCtrHmacSha256Provider();
 
@@ -257,52 +234,26 @@ byte[]? recovered = provider.TryDecrypt(key, nonce, aad, combined);
 
 ## Platform support
 
-| Target | `ChaCha20Poly1305Provider` | `AesGcmProvider` | `AesCtrHmacSha256Provider` |
-|---|---|---|---|
-| .NET 9+ (all platforms) | ✅ via BouncyCastle | ✅ Native | ✅ |
-| iOS / Android (.NET 9+) | ✅ via BouncyCastle | ✅ via BouncyCastle¹ | ✅ |
-
-¹ Select `AesGcmBouncyCastleProvider` explicitly from the `Hoddmir.BouncyCastle` package.
+Both packages target `net9.0` and `net10.0`. `AesGcmProvider` depends on the runtime's AES-GCM support. The `Hoddmir.BouncyCastle` package exposes `AesGcmBouncyCastleProvider` and `ChaCha20Poly1305Provider` in the `Hoddmir.BouncyCastle.Encryption.AEAD` namespace. Select either explicitly with `WithAead`.
 
 ---
 
-## Security and forensic resistance
+## Security model and limits
 
-### Threat model summary
+Hoddmir encrypts keys and values at rest and authenticates each record at its stored offset. File size and changes in size across snapshots remain visible. Resistance to offline password guessing depends on the password and the session Argon2id parameters.
 
-This is the expected threat model summary:
+- **Rollback.** The authenticated chain prevents splicing records from separate histories. To reject an older complete copy or a valid prefix after reopening, save the 32-byte result of `GetCheckpointAsync` in trusted storage and pass it to `OpenAtCheckpointAsync`. The checkpoint must match the authenticated log prefix when recovering an incomplete tail. Coordinate checkpoint updates with successful writes, compaction and rotation. The trusted storage must itself resist rollback.
+- **Corruption.** A complete record that fails authentication blocks normal reopening, even when a later record supersedes it.
+- **Process memory.** An open store holds the DEK in memory and returns plaintext to its caller. A compromised process, memory dump or swap file may expose sensitive material.
+- **Deletion.** Older values remain in the encrypted log until compaction. Previous copies and backups retain their contents.
 
-| Scenario | Resistance | Notes |
-|---|---|---|
-| File at rest, device off | ✅ Very high | AES-256 / ChaCha20-Poly1305 — no known practical attack |
-| File at rest, store closed, device on | ✅ Very high | No DEK in memory — equivalent to VeraCrypt with a dismounted volume |
-| Password brute force | ✅ High | Depends on password strength and Argon2id cost |
-| Forensic file analysis without memory | ✅ Very high | Fully opaque format — no magic bytes, no plaintext structure, statistically indistinguishable from random noise |
-| Memory forensics, store open | 🟡 Medium | DEK lives in the process during an open session — structural limitation of managed runtimes |
-| Swap / pagefile during active session | 🟡 Medium | OS may page process memory to disk; not controllable from managed code without kernel privileges |
-| Key name confidentiality | ✅ High | Blob keys are stored inside the encrypted payload of each record |
-| Nation-state, device off or store closed | ✅ Very high | No memory to dump — same posture as VeraCrypt with a dismounted volume |
-| Nation-state, store open on a live device | 🔴 Low | DEK is in memory; memory forensics, cold boot, or hypervisor introspection become viable |
-
-> **Disclaimer:** without a formal security audit the threat model above cannot be guaranteed. It is based on the authors' knowledge of common attack vectors and cryptographic best practices.
-
-### Notes
-
-**The cryptography is sound.** ChaCha20-Poly1305 and AES-256-GCM are the same algorithms used by Signal, WhatsApp, and NSA Suite B / CNSA. No practical cryptanalytic attack exists against correctly implemented 256-bit AEAD. All algorithms are verified against published test vectors (RFC 8439, NIST SP 800-38D, RFC 5869).
-
-**Memory forensics is the main exposure.** The DEK is resident in process memory for the duration of an open store session. A memory dump of the process (`ProcDump`, `WinPmem`, OS crash dump) can expose the DEK even with `SensitiveBytes` and `ZeroMemory` in place. This is a structural limitation of .NET managed runtimes — the JIT and GC can materialise intermediate values in registers or on the stack before zeroing occurs. VeraCrypt mitigates this using kernel drivers and non-pageable memory; Hoddmir cannot do this without elevated privileges.
-
-**Key names are encrypted.** The key and value are stored together in the authenticated ciphertext. File size and its growth across snapshots remain visible.
-
-**The real attack surface at nation-state level is never the ciphertext.** Keyloggers, compromised devices, supply chain attacks, and coercive access to the password are the practical vectors. No cryptographic library protects against these — Hoddmir included.
-
-**What would raise the bar further.** The main remaining exposure for forensic resistance is keeping the DEK resident in memory for the duration of an open store session. Deriving the DEK fresh from the password on each operation would eliminate this — at a significant performance cost. This is not necessary for Hoddmir's primary use case as an application-level blob store.
+The store format and AES-CTR + HMAC construction have yet to undergo an independent security audit.
 
 ---
 
 ## File format
 
-The current version is `0x01`. The file is **fully opaque** — there are no plaintext magic bytes, no visible structure, and no identifiable headers. The file is statistically indistinguishable from random noise.
+The current version is `0x01`. The magic value, version and algorithm ID are inside the encrypted header. The file also contains public salts, ciphertext and authentication tags. Recreate vaults produced by earlier development builds.
 
 ### On-disk layout
 
@@ -312,7 +263,7 @@ The current version is `0x01`. The file is **fully opaque** — there are no pla
 [Record...]
 ```
 
-The session KEK encrypts the 512-byte header following the session salt. The records use keys derived from the DEK.
+The session KEK encrypts the 512-byte header following the session salt and authenticates the UTF-8 string `Hoddmir/0x01/header` as associated data. The DEK wrapper authenticates `Hoddmir/0x01/dek` as associated data. The records use keys derived from the DEK.
 
 ### Header plaintext (decrypted, padded to 496 bytes with random data)
 
@@ -322,7 +273,7 @@ DekNonce(12)    | EncDek(32)   | DekTag(16)
 DekArgonSalt(16)| DekArgonMemKiB(4) | DekArgonIters(4) | DekArgonPar(4)
 ```
 
-### Record layout (all fields opaque from outside)
+### Record layout
 
 ```
 [RecordSalt(32)]
@@ -341,11 +292,13 @@ Payload plaintext:
 keyBytes(KeyLen) || value(ContentLen-KeyLen) || random_padding(PaddedLen-ContentLen)
 ```
 
-Operation `0` is a put and `1` is a tombstone with an empty value. The prefix authenticates the absolute record offset as an 8-byte little-endian integer. The payload authenticates the encrypted prefix and its tag as associated data.
+Operation `0` is a put and `1` is a tombstone with an empty value. The prefix authenticates the absolute record offset as an 8-byte little-endian integer followed by the SHA-256 digest of the previous serialized record. The first record uses the SHA-256 digest of the session salt and encrypted header. The payload authenticates the encrypted prefix and its tag as associated data.
 
 ### Index and recovery
 
-Each mutation appends one record. Opening the store authenticates records in file order and rebuilds the in-memory index. A complete record that fails authentication prevents opening. If the final record is incomplete, the store exposes the preceding records and reports the tail via `VerifyAsync`. Call `CompactAsync` to remove the incomplete tail before appending again. Compaction and rotation stop before replacing the file if any active record is unreadable.
+Each mutation appends one record. Opening the store authenticates records in file order and rebuilds the in-memory index. A complete record that fails authentication prevents opening. If the final record is incomplete, the store exposes the preceding records and reports the tail via `VerifyAsync`. Call `CompactAsync` to remove the incomplete tail before appending again.
+
+`VerifyAsync` checks that the header and committed log match the open store. A changed header sets `IsHeaderCorrupted`. A valid prefix that differs from the committed log sets `IsLogChanged`. An incomplete header is reported as truncation at offset zero. Verification stops at the first broken link in the log. Compaction and rotation reject a changed header or corrupt committed history. `GetAsync` throws `InvalidDataException` when an indexed record fails validation.
 
 ### Credentials
 
@@ -389,4 +342,4 @@ Pull requests are welcome. For significant changes, please open an issue first t
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+[Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).

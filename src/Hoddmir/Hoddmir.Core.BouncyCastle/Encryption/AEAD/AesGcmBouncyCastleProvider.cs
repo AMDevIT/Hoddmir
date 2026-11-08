@@ -38,13 +38,13 @@ public sealed class AesGcmBouncyCastleProvider : IAEADProvider
             throw new ArgumentException("Ciphertext span must equal plaintext length.");
 
         var gcm = new GcmBlockCipher(new AesEngine());
-        var parameters = new AeadParameters(new KeyParameter(key.ToArray()), TagSize * 8, nonce.ToArray(),
+        var parameters = new AeadParameters(new KeyParameter(key), TagSize * 8, nonce.ToArray(),
                                             aad.IsEmpty ? null : aad.ToArray());
         gcm.Init(true, parameters);
 
         var outBuf = new byte[gcm.GetOutputSize(plaintext.Length)];
-        int outLen = gcm.ProcessBytes(plaintext.ToArray(), 0, plaintext.Length, outBuf, 0);
-        outLen += gcm.DoFinal(outBuf, outLen);
+        int outLen = gcm.ProcessBytes(plaintext, outBuf);
+        gcm.DoFinal(outBuf.AsSpan(outLen));
 
         // BouncyCastle appends tag after ciphertext
         outBuf.AsSpan(0, plaintext.Length).CopyTo(ciphertext);
@@ -61,7 +61,7 @@ public sealed class AesGcmBouncyCastleProvider : IAEADProvider
             return false;
 
         var gcm = new GcmBlockCipher(new AesEngine());
-        var parameters = new AeadParameters(new KeyParameter(key.ToArray()), TagSize * 8, nonce.ToArray(),
+        var parameters = new AeadParameters(new KeyParameter(key), TagSize * 8, nonce.ToArray(),
                                             aad.IsEmpty ? null : aad.ToArray());
         gcm.Init(false, parameters);
 

@@ -269,7 +269,7 @@ public class KnownAnswerTests
     ///   1. HKDF-SHA-256(IKM=key, salt=zeros-32, info="AES-CTR-HKDF", L=64)
     ///      → Kenc (first 32 bytes) and Kmac (last 32 bytes)
     ///   2. AES-256-CTR-XOR(Kenc, nonce, pt) → ct
-    ///   3. Trunc-16(HMAC-SHA-256(Kmac, aad ‖ nonce ‖ ct)) → tag
+    ///   3. Trunc-16(HMAC-SHA-256(Kmac, LE64(aad length) ‖ LE64(ct length) ‖ aad ‖ nonce ‖ ct)) → tag
     /// </para>
     /// </summary>
     [TestMethod]
@@ -282,7 +282,7 @@ public class KnownAnswerTests
 
         // Expected values from Python reference implementation
         var expectedCt  = H("f958152a410ec67c68f5fb7806");
-        var expectedTag = H("8c98f1c219579715dcfad12eff1655bd");
+        var expectedTag = H("cdde28e521fa931465444261ff3f6d84");
 
         var provider = new AesCtrHmacSha256Provider();
         var ct  = new byte[pt.Length];
@@ -301,7 +301,7 @@ public class KnownAnswerTests
         var nonce = H("000102030405060708090a0b");
         var aad   = H("686f64646d69722d616164");
         var ct    = H("f958152a410ec67c68f5fb7806");
-        var tag   = H("8c98f1c219579715dcfad12eff1655bd");
+        var tag   = H("cdde28e521fa931465444261ff3f6d84");
         var expectedPt = H("68656c6c6f20686f64646d6972");
 
         var provider  = new AesCtrHmacSha256Provider();
@@ -323,7 +323,7 @@ public class KnownAnswerTests
         var nonce = H("000102030405060708090a0b");
         var aad   = H("686f64646d69722d616164");
         var ct    = H("f958152a410ec67c68f5fb7806");
-        var tag   = H("8c98f1c219579715dcfad12eff1655bd");
+        var tag   = H("cdde28e521fa931465444261ff3f6d84");
 
         ct[0] ^= 0x01; // flip one bit
 
@@ -332,5 +332,23 @@ public class KnownAnswerTests
         bool ok = provider.Decrypt(key, nonce, aad, ct, tag, recovered);
 
         Assert.IsFalse(ok, "AES-CTR+HMAC: tampered ciphertext should be rejected.");
+    }
+
+    /// <summary>Rejects a message that preserves the concatenated bytes while shifting field boundaries.</summary>
+    [TestMethod]
+    public void AesCtrHmacSha256_ShiftedFieldBoundaries_Rejected()
+    {
+        AesCtrHmacSha256Provider provider = new();
+        byte[] key = H("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+        byte[] nonce = H("000102030405060708090a0b");
+        byte[] plaintext = [0x12, 0x34];
+        byte[] ciphertext = new byte[plaintext.Length];
+        byte[] tag = new byte[provider.TagSizeBytes];
+        provider.Encrypt(key, nonce, ReadOnlySpan<byte>.Empty, plaintext, ciphertext, tag);
+
+        byte[] changedAad = [nonce[0]];
+        byte[] changedNonce = [.. nonce.AsSpan(1), ciphertext[0]];
+        byte[] changedPlaintext = new byte[ciphertext.Length - 1];
+        Assert.IsFalse(provider.Decrypt(key, changedNonce, changedAad, ciphertext.AsSpan(1), tag, changedPlaintext));
     }
 }

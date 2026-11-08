@@ -1,8 +1,9 @@
 ﻿using Hoddmir.Tests.ConsoleApp;
 
-Console.WriteLine("Generating test data...");
-
 TestProvider testProvider = new();
+await testProvider.VerifyFileStoreLifecycleAsync();
+
+Console.WriteLine("Generating test data...");
 Console.WriteLine("Generating fixed length data...");
 await testProvider.CreateTestStoreAsync(useFastArgon: false);
 Console.WriteLine("Generating random data...");

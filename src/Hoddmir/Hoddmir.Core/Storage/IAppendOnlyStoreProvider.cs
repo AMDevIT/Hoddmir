@@ -2,7 +2,8 @@ namespace Hoddmir.Storage;
 
 /// <summary>
 /// Abstraction over an append-only byte store with random-read support.
-/// Implementations must be thread-safe.
+/// Implementations must be thread-safe and grant the attached store exclusive write access
+/// to the underlying data for its lifetime, including during replacement.
 /// </summary>
 public interface IAppendOnlyStoreProvider
 {

@@ -26,6 +26,7 @@ Avoid taking control of the computer if not needed or if a command-line solution
    - affected files;
    - checks performed and their results;
    - open issues and the recommended next step.
+   Use english for the content and file name of context files.
 
 # Project Coding Conventions
 

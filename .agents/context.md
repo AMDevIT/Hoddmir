@@ -1,24 +1,62 @@
+## Hoddmir feature analysis
 
-## Analisi delle funzionalità di Hoddmir
+- Objective and status. Completed the initial review and static analysis.
+- Decision. Compared the source code and test cases with the README and changelog.
+- Affected files. Reviewed Core, Bouncy Castle, MSTest, and the console app. Added the [analysis note](feature-analysis.md).
+- Checks. Reviewed the code and the uniqueness test. Restore, build, and tests were outside the agreed scope.
+- Open issues. Reproduce the append and nonce reuse defects at runtime before validating file persistence.
 
-- Obiettivo e stato. Ricognizione e analisi statica completate.
-- Decisione. Confrontati i sorgenti e i casi di test con README e changelog.
-- File interessati. Consultati Core, Bouncy Castle, MSTest e app console. Aggiunta la [nota di analisi](analisi-funzionalita.md).
-- Controlli. Lettura del codice e del test di unicità. Restore, build e test esclusi dal perimetro concordato.
-- Questioni aperte. Riproduzione dinamica dei difetti di append e riuso dei nonce, da affrontare prima di validare la persistenza su file.
+## Hoddmir feature recheck
 
-## Riverifica delle funzionalità di Hoddmir
+- Objective and status. Completed the recheck and confirmed the findings on append, nonces, the index, and the Bouncy Castle provider.
+- Decision. Distinguished the isolated FileStream check from the findings confirmed by tracing the code.
+- Affected files. Added the [recheck note](feature-recheck.md) and updated this context. Reviewed the store, file backend, Bouncy Castle provider, tests, and README.
+- Checks. The FileStream check wrote at position 4 with a file length of 9. Verified the nonce and index reconstruction paths. Restore, build, and MSTest were not run.
+- Open issues. Integration tests and fixes. The next step is to add regression tests that observe actual nonces and a read followed by a write on the file backend.
 
-- Obiettivo e stato. Riverifica completata. Confermati i rilievi su append, nonce, indice e provider Bouncy Castle.
-- Decisione. Distinte la prova isolata di FileStream e le conferme ottenute per tracciamento del codice.
-- File interessati. Aggiunta la [nota di riverifica](riverifica-funzionalita.md) e aggiornato questo contesto. Consultati store, backend file, provider Bouncy Castle, test e README.
-- Controlli. La prova FileStream ha scritto alla posizione 4 con lunghezza 9. Verificati i percorsi dei nonce e della ricostruzione dell'indice. Restore, build e MSTest non eseguiti.
-- Questioni aperte. Prove di integrazione e correzioni. Il prossimo passo è aggiungere regressioni che osservino i nonce effettivi e la sequenza lettura-scrittura sul backend su file.
+## Persistence fixes for format 0x01
 
-## Correzioni della persistenza nel formato 0x01
+- Objective and status. Implemented the agreed fixes for append, nonces, and index reconstruction.
+- Decisions. Appends return the actual offset. Each record uses an HKDF-derived key, and the store rebuilds the in-memory index from the log. Compaction recovers an incomplete tail. There is no legacy compatibility path.
+- Affected files. Core Storage and providers, README, and MSTest tests. See the [persistence fixes note](format-01-persistence-fixes.md).
+- Checks. Roslyn C# 13 syntax analysis and `git diff --check` passed. Restore, build, and MSTest were skipped at the user's request.
+- Open issues. Validate at runtime on .NET 9 and .NET 10 when authorized, with particular attention to the file backend.
 
-- Obiettivo e stato. Implementati i fix concordati su append, nonce e ricostruzione dell'indice.
-- Decisioni. Append con offset effettivo, chiave HKDF per record e indice in memoria ricostruito dal log. Recupero della coda incompleta con compattazione. Nessun percorso legacy.
-- File interessati. Core Storage e provider, README e test MSTest. Dettagli nella [nota delle correzioni](fix-persistenza-formato-01.md).
-- Controlli. Analisi sintattica Roslyn C# 13 e git diff --check superati. Restore, build e MSTest esclusi su richiesta dell'utente.
-- Questioni aperte. Convalida a runtime su .NET 9 e .NET 10 quando autorizzata, con particolare attenzione al backend su file.
+## MAC and header verification fixes
+
+- Objective and status. Completed the two priority fixes for AES-CTR + HMAC and header integrity.
+- Decisions. Authenticate the AAD and ciphertext lengths. Compare the encrypted header with the validated copy before verification and rewrites. The format version is 0x01.
+- Affected files. AEAD provider, store, verification result, tests, and README. See the [MAC and header verification note](mac-and-header-verification-fixes.md).
+- Checks. Checked C# 13 syntax with Roslyn, ran `git diff --check`, checked the .NET 9 reference assemblies, and recomputed the tag independently. Restore, build, and MSTest were skipped at the user's request.
+- Next step. Validate at runtime when authorized. Assess the threat model for rollback and recovery from corruption separately.
+
+## NuGet preparation
+
+- Objective and status. Completed Bouncy Castle packaging and aligned the documentation.
+- Decisions. Use the Hoddmir.BouncyCastle package ID, include assets at the package root, and record the current format 0x01 changes in the Unreleased changelog.
+- Affected files. Hoddmir.Core.BouncyCastle.csproj, README.md, CHANGELOG.md, and the [NuGet preparation note](nuget-preparation.md).
+- Checks. Verified XML, file paths, and C# example alignment. `git diff --check` passed.
+- Next step. Generate and install both packages locally.
+
+## Store verification in the console app
+
+- Objective and status. Added a full test cycle to the existing console app.
+- Decisions. Use project references and a temporary file for verification. Run the data generators after the test cycle.
+- Affected files. Program.cs, TestProvider.cs, and the [console verification note](store-console-check.md).
+- Checks. C# 13 syntax analysis and `git diff --check`. The console app was neither built nor run.
+- Next step. Run the console app to verify the full cycle at runtime.
+
+## Writes after reopening in the console app
+
+- Objective and status. Extended the cycle to four sessions, including appends, updates, and deletions after reopening and writes after rotation.
+- Decision. Check keys, values, and log counts after rewrites and on the final reopen.
+- Affected files. TestProvider.cs and the [console verification note](store-console-check.md).
+- Checks. C# 13 syntax analysis, argument alignment checks, and `git diff --check` passed. The console app still needs to be run.
+
+## Security audit and format 0x01 hardening
+
+- Objective and status. Fixed the replay and robustness issues identified in the review. The development format remains 0x01 with no compatibility layer.
+- Decisions. Authenticate the log as a chain, provide trusted checkpoints, and enforce exclusive writer ownership.
+- Affected files. Core storage and crypto, Bouncy Castle providers, tests, README.md, CHANGELOG.md, and the [security audit note](security-audit-format-01.md).
+- Checks. Restore and build succeeded. All 164 MSTest cases passed on each of .NET 9 and .NET 10. The four-provider attack matrix passed on both targets.
+- Next step. Verify filesystem behavior on supported Unix platforms and have the cryptographic design independently reviewed.

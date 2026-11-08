@@ -12,6 +12,7 @@ public sealed class FileAppendOnlyStoreProvider
     #region Fields
 
     private readonly string path;
+    private readonly FileStream writerLock;
     // Not readonly: swapped after ReplaceWithAsync.
     private FileStream fs;
     // SemaphoreSlim(1,1) gives async-safe mutual exclusion.
@@ -25,7 +26,17 @@ public sealed class FileAppendOnlyStoreProvider
     {
         this.path = Path.GetFullPath(path);
         Directory.CreateDirectory(Path.GetDirectoryName(this.path)!);
-        this.fs = OpenStream(this.path, FileMode.OpenOrCreate);
+        // The lock file must keep the same identity across vault replacements and reopenings.
+        this.writerLock = new(this.path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        try
+        {
+            this.fs = OpenStream(this.path, FileMode.OpenOrCreate);
+        }
+        catch
+        {
+            this.writerLock.Dispose();
+            throw;
+        }
     }
 
     #endregion
@@ -88,8 +99,17 @@ public sealed class FileAppendOnlyStoreProvider
         string temp = this.path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            await using (FileStream output = new(temp, FileMode.CreateNew, FileAccess.Write,
-                                                 FileShare.None, 4096, FileOptions.Asynchronous))
+            FileStreamOptions options = new()
+            {
+                Mode = FileMode.CreateNew,
+                Access = FileAccess.Write,
+                Share = FileShare.None,
+                Options = FileOptions.Asynchronous
+            };
+            if (!OperatingSystem.IsWindows())
+                options.UnixCreateMode = File.GetUnixFileMode(this.path);
+
+            await using (FileStream output = new(temp, options))
             {
                 await buildNew(output).ConfigureAwait(false);
                 ct.ThrowIfCancellationRequested();
@@ -102,7 +122,7 @@ public sealed class FileAppendOnlyStoreProvider
                 await this.fs.DisposeAsync().ConfigureAwait(false);
                 try
                 {
-                    File.Replace(temp, this.path, null, ignoreMetadataErrors: true);
+                    File.Replace(temp, this.path, null, ignoreMetadataErrors: false);
                 }
                 finally
                 {
@@ -140,8 +160,12 @@ public sealed class FileAppendOnlyStoreProvider
         }
         finally 
         { 
-            semaphore.Release(); 
-            semaphore.Dispose(); 
+            try { await this.writerLock.DisposeAsync().ConfigureAwait(false); }
+            finally
+            {
+                semaphore.Release();
+                semaphore.Dispose();
+            }
         }
     }
 

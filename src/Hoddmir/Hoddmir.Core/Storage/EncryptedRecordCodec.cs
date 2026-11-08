@@ -18,6 +18,7 @@ internal sealed class EncryptedRecordCodec
     private const int HeaderLength = SaltLength + PrefixLength + TagLength;
     private const int RecordOverhead = HeaderLength + TagLength;
     private const int MaxPadding = 64;
+    internal const int DigestLength = 32;
 
     #endregion
 
@@ -45,7 +46,8 @@ internal sealed class EncryptedRecordCodec
     #region Methods
 
     /// <summary>Encrypts a put or tombstone for the specified absolute file offset.</summary>
-    public byte[] Encode(SensitiveBytes dek, long offset, string id, ReadOnlySpan<byte> value, bool deleted)
+    public byte[] Encode(SensitiveBytes dek, long offset, ReadOnlySpan<byte> previousDigest,
+                         string id, ReadOnlySpan<byte> value, bool deleted)
     {
         int idLength = Utf8.GetByteCount(id);
         int contentLength = checked(idLength + value.Length);
@@ -54,7 +56,7 @@ internal sealed class EncryptedRecordCodec
         byte[] payload = new byte[paddedLength];
         Span<byte> recordKey = stackalloc byte[KeyLength];
         Span<byte> prefix = stackalloc byte[PrefixLength];
-        Span<byte> position = stackalloc byte[sizeof(long)];
+        Span<byte> prefixAad = stackalloc byte[sizeof(long) + DigestLength];
         Span<byte> salt = record.AsSpan(0, SaltLength);
         Span<byte> encryptedPrefix = record.AsSpan(SaltLength, PrefixLength + TagLength);
 
@@ -70,9 +72,10 @@ internal sealed class EncryptedRecordCodec
             BinaryPrimitives.WriteInt32LittleEndian(prefix[1..], idLength);
             BinaryPrimitives.WriteInt32LittleEndian(prefix[5..], contentLength);
             BinaryPrimitives.WriteInt32LittleEndian(prefix[9..], paddedLength);
-            BinaryPrimitives.WriteInt64LittleEndian(position, offset);
+            BinaryPrimitives.WriteInt64LittleEndian(prefixAad, offset);
+            previousDigest.CopyTo(prefixAad[sizeof(long)..]);
 
-            this.aead.Encrypt(recordKey, PrefixNonce, position, prefix,
+            this.aead.Encrypt(recordKey, PrefixNonce, prefixAad, prefix,
                               encryptedPrefix[..PrefixLength], encryptedPrefix[PrefixLength..]);
             this.aead.Encrypt(recordKey, PayloadNonce, encryptedPrefix, payload,
                               record.AsSpan(HeaderLength, paddedLength), record.AsSpan(HeaderLength + paddedLength));
@@ -88,7 +91,8 @@ internal sealed class EncryptedRecordCodec
 
     /// <summary>Reads and authenticates a record, distinguishing incomplete tails from corrupt records.</summary>
     public async Task<RecordRead> ReadAsync(IAppendOnlyStoreProvider store, SensitiveBytes dek,
-                                            long offset, long end, bool includeValue, CancellationToken ct)
+                                            long offset, long end, ReadOnlyMemory<byte> previousDigest,
+                                            bool includeValue, CancellationToken ct)
     {
         if (end - offset < RecordOverhead)
             return new(ReadStatus.Truncated);
@@ -101,7 +105,7 @@ internal sealed class EncryptedRecordCodec
         try
         {
             DeriveKey(dek, header.AsSpan(0, SaltLength), recordKey);
-            if (!this.TryReadPrefix(header, recordKey, offset, out RecordPrefix prefix))
+            if (!this.TryReadPrefix(header, recordKey, offset, previousDigest.Span, out RecordPrefix prefix))
                 return new(ReadStatus.Corrupt);
 
             int length = RecordOverhead + prefix.PaddedLength;
@@ -142,16 +146,18 @@ internal sealed class EncryptedRecordCodec
         HKDF.DeriveKey(HashAlgorithmName.SHA256, dek.AsSpan(), output, salt, "Hoddmir/0x01/record"u8);
 
     /// <summary>Authenticates the prefix and validates lengths before any body allocation.</summary>
-    private bool TryReadPrefix(ReadOnlySpan<byte> header, ReadOnlySpan<byte> key, long offset, out RecordPrefix prefix)
+    private bool TryReadPrefix(ReadOnlySpan<byte> header, ReadOnlySpan<byte> key, long offset,
+                               ReadOnlySpan<byte> previousDigest, out RecordPrefix prefix)
     {
         prefix = default;
         Span<byte> plaintext = stackalloc byte[PrefixLength];
-        Span<byte> position = stackalloc byte[sizeof(long)];
-        BinaryPrimitives.WriteInt64LittleEndian(position, offset);
+        Span<byte> prefixAad = stackalloc byte[sizeof(long) + DigestLength];
+        BinaryPrimitives.WriteInt64LittleEndian(prefixAad, offset);
+        previousDigest.CopyTo(prefixAad[sizeof(long)..]);
 
         try
         {
-            if (!this.TryDecrypt(key, PrefixNonce, position, header.Slice(SaltLength, PrefixLength),
+            if (!this.TryDecrypt(key, PrefixNonce, prefixAad, header.Slice(SaltLength, PrefixLength),
                                  header[(SaltLength + PrefixLength)..], plaintext))
                 return false;
 
@@ -190,7 +196,7 @@ internal sealed class EncryptedRecordCodec
             byte[]? value = includeValue && !prefix.Deleted
                 ? payload.AsSpan(prefix.IdLength, prefix.ContentLength - prefix.IdLength).ToArray()
                 : null;
-            return new(ReadStatus.Valid, length, id, prefix.Deleted, value);
+            return new(ReadStatus.Valid, length, id, prefix.Deleted, value, ComputeDigest(header, body));
         }
         catch (DecoderFallbackException)
         {
@@ -200,6 +206,15 @@ internal sealed class EncryptedRecordCodec
         {
             CryptographicOperations.ZeroMemory(payload);
         }
+    }
+
+    /// <summary>Hashes the complete serialized record, including its salt and authentication tags.</summary>
+    private static byte[] ComputeDigest(ReadOnlySpan<byte> header, ReadOnlySpan<byte> body)
+    {
+        using IncrementalHash digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        digest.AppendData(header);
+        digest.AppendData(body);
+        return digest.GetHashAndReset();
     }
 
     /// <summary>Normalizes AEAD authentication failures across providers.</summary>
@@ -221,7 +236,7 @@ internal sealed class EncryptedRecordCodec
     internal enum ReadStatus { Valid, Truncated, Corrupt }
 
     internal readonly record struct RecordRead(ReadStatus Status, int Length = 0, string? Id = null,
-                                               bool Deleted = false, byte[]? Value = null);
+                                               bool Deleted = false, byte[]? Value = null, byte[]? Digest = null);
 
     private readonly record struct RecordPrefix(bool Deleted, int IdLength, int ContentLength, int PaddedLength);
 }

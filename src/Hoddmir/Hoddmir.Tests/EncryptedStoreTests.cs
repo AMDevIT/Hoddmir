@@ -212,7 +212,7 @@ public sealed class EncryptedStoreTests
         await using (var store = await CreateStoreAsync(ms, aead))
             await store.PutAsync("x", Encoding.UTF8.GetBytes("data"));
 
-        await Assert.ThrowsExceptionAsync<CryptographicException>(async () =>
+        await Assert.ThrowsExactlyAsync<CryptographicException>(async () =>
             await CreateStoreAsync(ms, aead,
                 password: Encoding.UTF8.GetBytes("wrong-password")));
     }
@@ -229,7 +229,7 @@ public sealed class EncryptedStoreTests
             await store.PutAsync("x", Encoding.UTF8.GetBytes("data"));
 
         // Reopen with sessionIters=2 — KEK is different, header decryption fails
-        await Assert.ThrowsExceptionAsync<CryptographicException>(async () =>
+        await Assert.ThrowsExactlyAsync<CryptographicException>(async () =>
             await CreateStoreAsync(ms, aead, sessionIters: 2));
     }
 
@@ -245,7 +245,7 @@ public sealed class EncryptedStoreTests
             await store.PutAsync("x", Encoding.UTF8.GetBytes("data"));
 
         // Reopen with saltLen=32 — reads wrong bytes as salt, header decryption fails.
-        // MSTest ThrowsExceptionAsync matches exact type only, so catch manually.
+        // MSTest ThrowsExactlyAsync matches exact type only, so catch manually.
         bool threw = false;
         try { await CreateStoreAsync(ms, aead, sessionSaltLen: 32); }
         catch (CryptographicException) { threw = true; }
@@ -409,7 +409,11 @@ public sealed class EncryptedStoreTests
 
             Assert.IsTrue((await reopened.VerifyAsync()).IsHealthy);
         }
-        finally { File.Delete(path); }
+        finally
+        {
+            File.Delete(path);
+            File.Delete(path + ".lock");
+        }
     }
 
     /// <summary>Recovers committed records and compacts away an incomplete append.</summary>
@@ -417,12 +421,14 @@ public sealed class EncryptedStoreTests
     public async Task FileStore_IncompleteTail_CanBeRecoveredByCompaction()
     {
         string path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".hoddmir");
+        byte[] checkpoint;
         try
         {
             await using (FileAppendOnlyStoreProvider backend = new(path))
             await using (EncryptedEntryStore store = await CreateStoreAsync(backend, new AesGcmProvider()))
             {
                 await store.PutAsync("committed", "value"u8.ToArray());
+                checkpoint = await store.GetCheckpointAsync();
                 await store.PutAsync("incomplete", "value"u8.ToArray());
             }
 
@@ -430,16 +436,106 @@ public sealed class EncryptedStoreTests
                 file.SetLength(file.Length - 5);
 
             await using FileAppendOnlyStoreProvider reopenedBackend = new(path);
-            await using EncryptedEntryStore reopened = await CreateStoreAsync(reopenedBackend, new AesGcmProvider());
+            await using EncryptedEntryStore reopened = await EncryptedEntryStore.Configure()
+                .WithPassword(Password)
+                .WithSessionIterations(1)
+                .WithAead(new AesGcmProvider())
+                .OpenAtCheckpointAsync(reopenedBackend, reopenedBackend, checkpoint);
             CollectionAssert.AreEqual("value"u8.ToArray(), await reopened.GetAsync("committed"));
             Assert.IsNull(await reopened.GetAsync("incomplete"));
             Assert.AreEqual(1, (await reopened.VerifyAsync()).TruncatedRecords);
-            await Assert.ThrowsExceptionAsync<InvalidDataException>(() => reopened.PutAsync("next", "value"u8.ToArray()));
+            await Assert.ThrowsExactlyAsync<InvalidDataException>(() => reopened.PutAsync("next", "value"u8.ToArray()));
             await reopened.CompactAsync();
             await reopened.PutAsync("next", "value"u8.ToArray());
             Assert.IsTrue((await reopened.VerifyAsync()).IsHealthy);
         }
-        finally { File.Delete(path); }
+        finally
+        {
+            File.Delete(path);
+            File.Delete(path + ".lock");
+        }
+    }
+
+    /// <summary>Rejects a same-offset record from an older snapshot after compaction.</summary>
+    [TestMethod]
+    [DynamicData(nameof(Providers), DynamicDataSourceType.Method)]
+    public async Task ReplayedRecord_CannotBeCombinedWithNewHistory(IAEADProvider aead)
+    {
+        const int headerSize = 16 + 512;
+        MemoryAppendOnlyStoreProvider backend = new();
+        byte[] oldSnapshot;
+        byte[] currentSnapshot;
+        byte[] checkpoint;
+
+        await using (EncryptedEntryStore store = await CreateStoreAsync(backend, aead))
+        {
+            await store.PutAsync("role", "allow"u8.ToArray());
+            oldSnapshot = new byte[(int)await backend.GetLengthAsync()];
+            Assert.AreEqual(oldSnapshot.Length, await backend.ReadAtAsync(0, oldSnapshot));
+
+            await store.PutAsync("role", "block"u8.ToArray());
+            // Both values have the same length. Retry until random padding matches.
+            for (int attempt = 0; attempt < 2048; attempt++)
+            {
+                await store.CompactAsync();
+                if (await backend.GetLengthAsync() == oldSnapshot.Length)
+                    break;
+            }
+            Assert.AreEqual((long)oldSnapshot.Length, await backend.GetLengthAsync());
+
+            await store.PutAsync("current", "new"u8.ToArray());
+            currentSnapshot = new byte[(int)await backend.GetLengthAsync()];
+            Assert.AreEqual(currentSnapshot.Length, await backend.ReadAtAsync(0, currentSnapshot));
+            checkpoint = await store.GetCheckpointAsync();
+        }
+
+        EncryptedEntryStore.StoreBuilder builder = EncryptedEntryStore.Configure()
+            .WithPassword(Password)
+            .WithAead(aead)
+            .WithSessionIterations(1);
+        await using (EncryptedEntryStore reopened = await builder.OpenAtCheckpointAsync(backend, backend, checkpoint))
+            CollectionAssert.AreEqual("block"u8.ToArray(), await reopened.GetAsync("role"));
+
+        oldSnapshot.AsSpan(headerSize).CopyTo(currentSnapshot.AsSpan(headerSize));
+        await backend.ReplaceWithAsync(stream => stream.WriteAsync(currentSnapshot).AsTask());
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => CreateStoreAsync(backend, aead));
+
+        await backend.ReplaceWithAsync(stream => stream.WriteAsync(oldSnapshot).AsTask());
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => builder.OpenAtCheckpointAsync(backend, backend, checkpoint));
+    }
+
+    /// <summary>Refuses a second attachment and releases the backend when the first store closes.</summary>
+    [TestMethod]
+    public async Task SecondAttachment_CannotWriteToSharedBackend()
+    {
+        MemoryAppendOnlyStoreProvider backend = new();
+        AesGcmProvider aead = new();
+        await using (EncryptedEntryStore store = await CreateStoreAsync(backend, aead))
+        {
+            await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => CreateStoreAsync(backend, aead));
+            await store.PutAsync("key", "value"u8.ToArray());
+        }
+        await using EncryptedEntryStore reopened = await CreateStoreAsync(backend, aead);
+        CollectionAssert.AreEqual("value"u8.ToArray(), await reopened.GetAsync("key"));
+    }
+
+    /// <summary>Rejects missing content when opening and rejects existing content when creating.</summary>
+    [TestMethod]
+    public async Task StrictOpenAndCreate_DistinguishEmptyAndExistingBackends()
+    {
+        MemoryAppendOnlyStoreProvider backend = new();
+        EncryptedEntryStore.StoreBuilder builder = EncryptedEntryStore.Configure()
+            .WithPassword(Password)
+            .WithAead(new AesGcmProvider())
+            .WithSessionIterations(1)
+            .WithDekArgon2id(FastDekArgon);
+
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => builder.OpenExistingAsync(backend, backend));
+        await using (EncryptedEntryStore store = await builder.CreateAsync(backend, backend))
+            await store.PutAsync("key", "value"u8.ToArray());
+        await Assert.ThrowsExactlyAsync<IOException>(() => builder.CreateAsync(backend, backend));
+        await using EncryptedEntryStore reopened = await builder.OpenExistingAsync(backend, backend);
+        CollectionAssert.AreEqual("value"u8.ToArray(), await reopened.GetAsync("key"));
     }
 
     // ── DEK rotation ────────────────────────────────────────────────────────
@@ -479,6 +575,7 @@ public sealed class EncryptedStoreTests
         await store.DisposeAsync();
 
         // Reopen with new password — must succeed
+        await store.DisposeAsync();
         await using var store2 = await CreateStoreAsync(ms, aead, password: newPassword);
         var got = await store2.GetAsync("x");
         Assert.IsNotNull(got);
@@ -498,7 +595,8 @@ public sealed class EncryptedStoreTests
         await store.RotateDekAsync(Password, newPasswordUtf8: newPassword);
         await store.DisposeAsync();
 
-        await Assert.ThrowsExceptionAsync<CryptographicException>(async () =>
+        await store.DisposeAsync();
+        await Assert.ThrowsExactlyAsync<CryptographicException>(async () =>
             await CreateStoreAsync(ms, aead, password: Password));
     }
 
@@ -512,7 +610,7 @@ public sealed class EncryptedStoreTests
         await store.PutAsync("k", Encoding.UTF8.GetBytes("v"));
 
         byte[] wrong = Encoding.UTF8.GetBytes("wrong-password");
-        await Assert.ThrowsExceptionAsync<CryptographicException>(async () =>
+        await Assert.ThrowsExactlyAsync<CryptographicException>(async () =>
             await store.RotateDekAsync(wrong));
 
         // Store must still be readable with original password after failed rotation

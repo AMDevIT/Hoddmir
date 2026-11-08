@@ -152,7 +152,7 @@ public class AEADProvidersTests
         var tag   = new byte[p.TagSizeBytes];
 
         // Encrypt with wrong nonce length → ArgumentException
-        Assert.ThrowsException<ArgumentException>(() =>
+        Assert.ThrowsExactly<ArgumentException>(() =>
             p.Encrypt(key, Rnd(p.NonceSizeBytes + 1), [], pt, ct, tag),
             $"{p.Name}: wrong nonce length did not throw");
 
@@ -253,7 +253,7 @@ public class AEADProvidersTests
     public void AesCtrHmac_ShortSaltThrows()
     {
         // Salt shorter than 32 bytes must be rejected at construction time.
-        Assert.ThrowsException<ArgumentException>(() =>
+        Assert.ThrowsExactly<ArgumentException>(() =>
             new AesCtrHmacSha256Provider(hkdfSalt: new byte[16]),
             "Salt shorter than 32 bytes should throw ArgumentException.");
     }
@@ -281,10 +281,9 @@ public class AEADProvidersTests
     }
 
     [TestMethod]
-    public void AesCtrHmac_LowEntropyIkmWithExplicitSaltNoWarning()
+    public void AesCtrHmac_LowEntropyIkmWithExplicitSaltStillLogsWarning()
     {
-        // When an explicit salt is provided, no warning should be emitted
-        // even for a low-entropy IKM — the caller has acknowledged the situation.
+        // A public HKDF salt does not protect a weak key from guessing.
         var logMessages = new List<string>();
         var logger      = new CapturingLogger(logMessages);
         var p           = new AesCtrHmacSha256Provider(hkdfSalt: Rnd(32), logger: logger);
@@ -297,8 +296,8 @@ public class AEADProvidersTests
 
         p.Encrypt(weakKey, nonce, [], [], ct, tag);
 
-        Assert.IsFalse(logMessages.Any(m => m.Contains("low entropy")),
-            "No low-entropy warning expected when an explicit salt is provided.");
+        Assert.IsTrue(logMessages.Any(m => m.Contains("low entropy")),
+            "Expected a low-entropy warning even with an explicit salt.");
     }
 
     private static IEnumerable<object[]> GetProviders()

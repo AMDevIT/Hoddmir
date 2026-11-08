@@ -1,4 +1,4 @@
-﻿using Hoddmir.BouncyCastle.Encryption.AEAD;
+using Hoddmir.BouncyCastle.Encryption.AEAD;
 using Hoddmir.Core.Encryption.AEAD;
 using Hoddmir.Core.Keys;
 using Hoddmir.Storage;
@@ -152,6 +152,42 @@ public sealed class VerifyAsyncTests
     // Record boundaries are captured from the backend after each write, so
     // corruption can target a prefix or payload tag without duplicating the codec.
 
+    /// <summary>Reports header corruption and prevents it from being copied during a rewrite.</summary>
+    [TestMethod]
+    [DynamicData(nameof(Providers), DynamicDataSourceType.Method)]
+    public async Task ChangedHeader_IsReportedAndBlocksCompaction(IAEADProvider aead)
+    {
+        MemoryAppendOnlyStoreProvider backend = new();
+        await using EncryptedEntryStore store = await CreateStoreAsync(backend, aead);
+        await store.PutAsync("record", "value"u8.ToArray());
+        FlipByteAt(backend, HeaderSize - 1);
+
+        VerifyResult result = await store.VerifyAsync();
+
+        Assert.IsTrue(result.IsHeaderCorrupted);
+        Assert.IsFalse(result.IsHealthy);
+        Assert.AreEqual(1, result.ValidRecords);
+        Assert.AreEqual(0, result.CorruptedRecords);
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.CompactAsync());
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.RotateDekAsync(Password));
+    }
+
+    /// <summary>Reports an incomplete header at offset zero.</summary>
+    [TestMethod]
+    [DynamicData(nameof(Providers), DynamicDataSourceType.Method)]
+    public async Task TruncatedHeader_IsReportedAtOffsetZero(IAEADProvider aead)
+    {
+        MemoryAppendOnlyStoreProvider backend = new();
+        await using EncryptedEntryStore store = await CreateStoreAsync(backend, aead);
+        TruncateStore(backend, bytesToRemove: 1);
+
+        VerifyResult result = await store.VerifyAsync();
+
+        Assert.IsFalse(result.IsHealthy);
+        CollectionAssert.AreEqual(new long[] { 0 }, result.TruncatedOffsets.ToArray());
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.CompactAsync());
+    }
+
     [TestMethod]
     [DynamicData(nameof(Providers), DynamicDataSourceType.Method)]
     public async Task CorruptedRecordArea_DetectedAsCorrupted(IAEADProvider aead)
@@ -194,9 +230,11 @@ public sealed class VerifyAsyncTests
         Assert.IsFalse(result.IsHealthy);
         Assert.AreEqual(1, result.CorruptedRecords);
         Assert.AreEqual(0, result.TruncatedRecords);
-        await Assert.ThrowsExceptionAsync<InvalidDataException>(() => store.CompactAsync());
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.CompactAsync());
         Assert.AreEqual(length, await ms.GetLengthAsync());
-        await Assert.ThrowsExceptionAsync<InvalidDataException>(() => CreateStoreAsync(ms, aead));
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.GetAsync("victim"));
+        await store.DisposeAsync();
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => CreateStoreAsync(ms, aead));
     }
 
     [TestMethod]
@@ -221,7 +259,7 @@ public sealed class VerifyAsyncTests
 
     [TestMethod]
     [DynamicData(nameof(Providers), DynamicDataSourceType.Method)]
-    public async Task MultipleCorruptedAreas_AllDetected(IAEADProvider aead)
+    public async Task BrokenChain_StopsAtFirstCorruptedRecord(IAEADProvider aead)
     {
         Trace.WriteLine($"Provider: {aead}");
         var ms = new MemoryAppendOnlyStoreProvider();
@@ -240,8 +278,25 @@ public sealed class VerifyAsyncTests
         var result = await store.VerifyAsync();
 
         Assert.IsFalse(result.IsHealthy);
-        Assert.AreEqual(2, result.CorruptedRecords);
-        Assert.AreEqual(2, result.ValidRecords);
+        Assert.AreEqual(1, result.CorruptedRecords);
+        Assert.AreEqual(0, result.ValidRecords);
+    }
+
+    /// <summary>Detects removal of a complete committed record while the store is open.</summary>
+    [TestMethod]
+    [DynamicData(nameof(Providers), DynamicDataSourceType.Method)]
+    public async Task TruncationAtBoundary_ChangesCommittedLog(IAEADProvider aead)
+    {
+        MemoryAppendOnlyStoreProvider backend = new();
+        await using EncryptedEntryStore store = await CreateStoreAsync(backend, aead);
+        await store.PutAsync("record", "value"u8.ToArray());
+        long length = await backend.GetLengthAsync();
+        TruncateStore(backend, bytesToRemove: (int)(length - HeaderSize));
+
+        VerifyResult result = await store.VerifyAsync();
+        Assert.IsTrue(result.IsLogChanged);
+        Assert.IsFalse(result.IsHealthy);
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.CompactAsync());
     }
 
     // ── Truncation detection ─────────────────────────────────────────────────
