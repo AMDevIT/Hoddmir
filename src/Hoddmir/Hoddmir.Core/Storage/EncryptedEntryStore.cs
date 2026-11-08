@@ -35,6 +35,9 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     private const int MaxDekIterations = 10;
     private const int MaxDekParallelism = 16;
     private const int DigestBufferSize = 64 * 1024;
+    private const int DefaultMaxIndexedIds = 65_536;
+    private const int DefaultMaxIndexedIdBytes = 16 * 1024 * 1024;
+    private const int DefaultMaxRecordContentBytes = 16 * 1024 * 1024;
 
     #endregion
 
@@ -46,6 +49,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     private readonly IAEADProvider aead;
     private readonly IArgonKeyProvider argonKeyProvider;
     private readonly EncryptedRecordCodec codec;
+    private readonly StoreLimits limits;
     private readonly ILogger? logger;
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly SemaphoreSlim backendLease;
@@ -54,6 +58,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     private byte[] validatedHeader;
     private byte[] endDigest;
     private Dictionary<string, IndexEntry> index = new(StringComparer.Ordinal);
+    private int indexedIdBytes;
     private int sessionSaltLength;
     private int sessionIterations;
     private long endOffset;
@@ -68,14 +73,15 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
 
     private EncryptedEntryStore(IAppendOnlyStoreProvider store, IAtomicReplace replacer, IAEADProvider aead,
                                 IArgonKeyProvider argonKeyProvider, SensitiveBytes dek, byte[] validatedHeader,
-                                int sessionSaltLength, int sessionIterations, ILogger? logger,
+                                int sessionSaltLength, int sessionIterations, StoreLimits limits, ILogger? logger,
                                 SemaphoreSlim backendLease)
     {
         this.store = store;
         this.replacer = replacer;
         this.aead = aead;
         this.argonKeyProvider = argonKeyProvider;
-        this.codec = new(aead);
+        this.codec = new(aead, limits.MaxRecordContentBytes);
+        this.limits = limits;
         this.dek = dek;
         this.validatedHeader = validatedHeader;
         this.backendLease = backendLease;
@@ -94,6 +100,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     public static StoreBuilder Configure() => new();
 
     /// <summary>Appends a new value for the specified ID.</summary>
+    /// <exception cref="InvalidOperationException">Adding the ID would exceed the live index limits.</exception>
     public Task PutAsync(string id, ReadOnlyMemory<byte> value, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(id);
@@ -259,7 +266,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     private static async Task<EncryptedEntryStore> OpenCoreAsync(IAppendOnlyStoreProvider store, IAtomicReplace replacer,
                                                                  IAEADProvider aead, byte[] passwordUtf8, int sessionIterations,
                                                                  int sessionSaltLength, IArgon2idParamsProvider? dekArgonParams,
-                                                                 IArgonKeyProvider argonKeyProvider, ILogger? logger,
+                                                                 IArgonKeyProvider argonKeyProvider, StoreLimits limits, ILogger? logger,
                                                                  bool createNew, ReadOnlyMemory<byte> expectedCheckpoint,
                                                                  CancellationToken ct)
     {
@@ -297,7 +304,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             }
 
             EncryptedEntryStore instance = new(store, replacer, aead, argonKeyProvider, dek, header,
-                                               sessionSaltLength, sessionIterations, logger, backendLease);
+                                               sessionSaltLength, sessionIterations, limits, logger, backendLease);
             if (!createNew)
             {
                 VerifyResult result = await instance.ScanAsync(rebuildIndex: true, ct).ConfigureAwait(false);
@@ -327,9 +334,13 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             if (this.incompleteTail)
                 throw new InvalidDataException("Compact the store to remove its incomplete tail before appending.");
 
+            int idLength = this.codec.GetIdLength(id);
+            int updatedIdBytes = this.GetUpdatedIndexSize(id, idLength, deleted)
+                ?? throw new InvalidOperationException("Adding the ID would exceed the live index limits.");
+
             await this.ValidateAppendTargetAsync(ct).ConfigureAwait(false);
             long expectedOffset = this.endOffset;
-            byte[] record = this.codec.Encode(this.dek, expectedOffset, this.endDigest, id, value.Span, deleted);
+            byte[] record = this.codec.Encode(this.dek, expectedOffset, this.endDigest, id, idLength, value.Span, deleted);
             byte[] digest = SHA256.HashData(record);
             ct.ThrowIfCancellationRequested();
 
@@ -337,7 +348,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             {
                 await this.store.AppendAsync(record, expectedOffset).ConfigureAwait(false);
                 await this.store.FlushAsync(true).ConfigureAwait(false);
-                this.UpdateIndex(id, deleted, new(expectedOffset, record.Length, this.endDigest, digest));
+                this.UpdateIndex(id, deleted, new(expectedOffset, record.Length, this.endDigest, digest), updatedIdBytes);
                 this.lastRecordOffset = expectedOffset;
                 this.endOffset = expectedOffset + record.Length;
                 this.endDigest = digest;
@@ -444,7 +455,10 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             {
                 if (rebuildIndex)
                 {
-                    this.UpdateIndex(record.Id!, record.Deleted, new(position, record.Length, digest, record.Digest!));
+                    string id = record.Id!;
+                    int updatedIdBytes = this.GetUpdatedIndexSize(id, record.IdLength, record.Deleted)
+                        ?? throw new InvalidDataException($"Record at offset 0x{position:x} exceeds the live index limits.");
+                    this.UpdateIndex(id, record.Deleted, new(position, record.Length, digest, record.Digest!), updatedIdBytes);
                     this.lastRecordOffset = position;
                 }
 
@@ -495,7 +509,8 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
 
                     try
                     {
-                        byte[] record = this.codec.Encode(targetDek, offset, digest, id, value, deleted: false);
+                        int idLength = this.codec.GetIdLength(id);
+                        byte[] record = this.codec.Encode(targetDek, offset, digest, id, idLength, value, deleted: false);
                         await stream.WriteAsync(record, ct).ConfigureAwait(false);
                         byte[] previousDigest = digest;
                         digest = SHA256.HashData(record);
@@ -524,13 +539,27 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         this.incompleteTail = false;
     }
 
-    /// <summary>Applies an authenticated mutation to the in-memory index.</summary>
-    private void UpdateIndex(string id, bool deleted, IndexEntry entry)
+    /// <summary>Returns the new UTF-8 byte count or null if the mutation would exceed either index limit.</summary>
+    private int? GetUpdatedIndexSize(string id, int idLength, bool deleted)
+    {
+        if (this.index.ContainsKey(id))
+            return deleted ? this.indexedIdBytes - idLength : this.indexedIdBytes;
+        if (deleted)
+            return this.indexedIdBytes;
+
+        if (this.index.Count >= this.limits.MaxIndexedIds || idLength > this.limits.MaxIndexedIdBytes - this.indexedIdBytes)
+            return null;
+        return this.indexedIdBytes + idLength;
+    }
+
+    /// <summary>Applies an authenticated mutation and its precomputed size to the in-memory index.</summary>
+    private void UpdateIndex(string id, bool deleted, IndexEntry entry, int updatedIdBytes)
     {
         if (deleted)
             this.index.Remove(id);
         else
             this.index[id] = entry;
+        this.indexedIdBytes = updatedIdBytes;
     }
 
     /// <summary>Prevents use of a disposed store or one whose last write has an uncertain outcome.</summary>
@@ -688,8 +717,9 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
     #endregion
 
     private readonly record struct IndexEntry(long Offset, int Length, byte[] PreviousDigest, byte[] Digest);
+    private readonly record struct StoreLimits(int MaxIndexedIds, int MaxIndexedIdBytes, int MaxRecordContentBytes);
 
-    /// <summary>Configures the password, derivation parameters and AEAD for a store.</summary>
+    /// <summary>Configures the credentials, encryption provider and resource limits for a store.</summary>
     public sealed class StoreBuilder
     {
         #region Fields
@@ -701,6 +731,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         private ILogger? logger;
         private int sessionIterations = DefaultSessionIterations;
         private int sessionSaltLength = DefaultSessionSaltLength;
+        private StoreLimits limits = new(DefaultMaxIndexedIds, DefaultMaxIndexedIdBytes, DefaultMaxRecordContentBytes);
 
         #endregion
 
@@ -758,6 +789,24 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             return this;
         }
 
+        /// <summary>Sets the resource limits for creation, opening and subsequent store operations.</summary>
+        /// <param name="maxIndexedIds">Maximum number of active IDs. Defaults to 65,536.</param>
+        /// <param name="maxIndexedIdBytes">Maximum combined UTF-8 size of the active IDs. Defaults to 16 MiB.</param>
+        /// <param name="maxRecordContentBytes">Maximum combined size of a record's UTF-8 ID and value. Defaults to 16 MiB.</param>
+        /// <exception cref="ArgumentOutOfRangeException">A limit is outside the supported range.</exception>
+        public StoreBuilder WithResourceLimits(int maxIndexedIds = DefaultMaxIndexedIds,
+                                               int maxIndexedIdBytes = DefaultMaxIndexedIdBytes,
+                                               int maxRecordContentBytes = DefaultMaxRecordContentBytes)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxIndexedIds);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(maxIndexedIds, Array.MaxLength);
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxIndexedIdBytes);
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxRecordContentBytes);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(maxRecordContentBytes, EncryptedRecordCodec.MaxSupportedContentLength);
+            this.limits = new(maxIndexedIds, maxIndexedIdBytes, maxRecordContentBytes);
+            return this;
+        }
+
         /// <summary>Opens an existing vault and rejects empty or missing content.</summary>
         public Task<EncryptedEntryStore> OpenAsync(IAppendOnlyStoreProvider store, IAtomicReplace replacer,
                                                    CancellationToken ct = default) =>
@@ -789,7 +838,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
                 throw new InvalidOperationException("A password must be set via WithPassword().");
 
             return OpenCoreAsync(store, replacer, this.aead, this.password, this.sessionIterations, this.sessionSaltLength,
-                                 this.dekArgonParams, this.argonKeyProvider ?? new ArgonKeyProvider(), this.logger,
+                                 this.dekArgonParams, this.argonKeyProvider ?? new ArgonKeyProvider(), this.limits, this.logger,
                                  createNew, expectedCheckpoint, ct);
         }
 

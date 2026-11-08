@@ -43,8 +43,8 @@ Two independent Argon2id derivations protect the store:
 
 | Derivation | Purpose | Parameters |
 |---|---|---|
-| **Session KEK** | Encrypts the entire header blob | `password + salt(on-disk) + sessionIterations(caller) + SessionMemKiB=64MiB(hardcoded)` |
-| **DEK KEK** | Encrypts the DEK inside the header | `password + DekArgonSalt(in header) + DekArgonParams(in header)` |
+| **Session KEK** | Encrypts the entire header blob | Password, public session salt, caller-supplied iterations, 64 MiB of memory, and two lanes. |
+| **DEK KEK** | Encrypts the DEK inside the header | Password, DEK salt, and Argon2id parameters from the authenticated header. |
 
 The DEK KEK parameters are stored inside the encrypted header and can be changed during key rotation. Hoddmir accepts up to 512 MiB, 10 iterations and 16 lanes for this derivation, with at least 8 KiB per lane. Callers supply the session parameters (`sessionIterations`, `sessionSaltLen`) each time they open the store. An offline attacker can test a password guess against the outer header tag with one session Argon2id derivation.
 
@@ -83,6 +83,7 @@ dotnet add package Hoddmir.BouncyCastle
 using Hoddmir.Core.Encryption.AEAD;
 using Hoddmir.Storage;
 using Hoddmir.Storage.Providers;
+using System.IO;
 using System.Text;
 
 await using var fileStore = new FileAppendOnlyStoreProvider("vault.bin", FileMode.CreateNew);
@@ -139,15 +140,16 @@ await store.PutAsync("session/token", Encoding.UTF8.GetBytes("Bearer eyJ..."));
 
 ### Reopen an existing store
 
-To reopen a store, use the same password, session parameters and a compatible AEAD provider.
-`OpenAsync` requires an initialized vault. To create one, use `CreateAsync` on an empty backend. The file backend opens existing files by default. Pass `FileMode.CreateNew` to create a file at an unused path. The backend keeps a sibling `.lock` file to exclude another writer during file replacement. Keep this lock file in place while any backend for the vault may be open.
+To reopen a store, use the same password and session parameters and select a compatible AEAD provider. The .NET and Bouncy Castle AES-GCM providers can open each other's vaults.
+
+`OpenAsync` requires an initialized vault. Use `CreateAsync` on an empty backend to initialize a new vault. The file backend opens existing files by default. Pass `FileMode.CreateNew` to create a file at an unused path. Keep the sibling `.lock` file in place while the vault is in use so the writer lock survives compaction and key rotation.
 
 ```csharp
 // First session
 await using (var fileStore = new FileAppendOnlyStoreProvider("vault.bin", FileMode.CreateNew))
 {
     await using var store = await EncryptedEntryStore.Configure()
-        .WithPassword(password)
+        .WithPassword(passwordBytes)
         .WithAead(new AesGcmProvider())
         .CreateAsync(fileStore, fileStore);
 
@@ -157,12 +159,35 @@ await using (var fileStore = new FileAppendOnlyStoreProvider("vault.bin", FileMo
 // Later session
 await using var fileStore2 = new FileAppendOnlyStoreProvider("vault.bin");
 await using var store2 = await EncryptedEntryStore.Configure()
-    .WithPassword(password)
+    .WithPassword(passwordBytes)
     .WithAead(new AesGcmProvider())
     .OpenAsync(fileStore2, fileStore2);
 
 byte[]? pdf = await store2.GetAsync("report/q3.pdf");
 ```
+
+### Resource limits
+
+Set the resource policy with `WithResourceLimits` before calling `CreateAsync`, `OpenAsync`, or `OpenAtCheckpointAsync` on the builder. Omitted arguments use these defaults.
+
+| Argument | Default | What it bounds |
+|---|---:|---|
+| `maxIndexedIds` | 65,536 | Number of active IDs. A file stored under a single ID takes one slot. |
+| `maxIndexedIdBytes` | 16 MiB | Combined UTF-8 size of active IDs. |
+| `maxRecordContentBytes` | 16 MiB | Combined plaintext size of one UTF-8 ID and its value. |
+
+```csharp
+EncryptedEntryStore.StoreBuilder builder = EncryptedEntryStore.Configure()
+    .WithPassword(passwordBytes)
+    .WithAead(new AesGcmProvider())
+    .WithResourceLimits(maxIndexedIds: 200_000,
+                        maxIndexedIdBytes: 32 * 1024 * 1024,
+                        maxRecordContentBytes: 64 * 1024 * 1024);
+```
+
+The application supplies the limits for each session. Opening raises `InvalidDataException` if the authenticated history exceeds them, including older records and earlier peaks in the active index. An oversized write raises `ArgumentOutOfRangeException` for the record limit or `InvalidOperationException` for an index limit.
+
+Encryption and decryption can hold multiple buffers in memory, so the record content limit can be lower than peak RAM usage.
 
 ### Fixed Argon2id parameters
 
@@ -208,6 +233,23 @@ The store is append-only. A delete appends a tombstone, and an overwrite appends
 await store.CompactAsync();
 ```
 
+### Trusted checkpoints
+
+After a successful write, compaction, or key rotation, capture the current 32-byte checkpoint and save it in application storage that can resist rollback independently of the vault.
+
+```csharp
+byte[] checkpoint = await store.GetCheckpointAsync();
+```
+
+In a later session, load the saved checkpoint and use it with the builder configured for the vault.
+
+```csharp
+await using FileAppendOnlyStoreProvider backend = new("vault.bin");
+await using EncryptedEntryStore reopened = await builder.OpenAtCheckpointAsync(backend, backend, checkpoint);
+```
+
+A checkpoint mismatch raises `InvalidDataException`. Keep the vault and trusted checkpoint in sync as part of the application's commit and recovery workflow. If a write left an incomplete tail and the last complete record matches the checkpoint, the vault can reopen at that prefix. Compact the vault before resuming writes or capturing a new checkpoint.
+
 ### Using AEAD providers directly
 
 Hoddmir's AEAD providers can be used independently of the store to encrypt arbitrary blobs.
@@ -242,7 +284,7 @@ Both packages target `net9.0` and `net10.0`. `AesGcmProvider` depends on the run
 
 Hoddmir encrypts keys and values at rest and authenticates each record at its stored offset. File size and changes in size across snapshots remain visible. Resistance to offline password guessing depends on the password and the session Argon2id parameters.
 
-- **Rollback.** The authenticated chain prevents splicing records from separate histories. To reject an older complete copy or a valid prefix after reopening, save the 32-byte result of `GetCheckpointAsync` in trusted storage and pass it to `OpenAtCheckpointAsync`. The checkpoint must match the authenticated log prefix when recovering an incomplete tail. Coordinate checkpoint updates with successful writes, compaction and rotation. The trusted storage must itself resist rollback.
+- **Rollback.** The authenticated chain detects record splices and reordering. Detecting a complete older copy or a valid prefix across reopen requires a [trusted checkpoint](#trusted-checkpoints).
 - **Corruption.** A complete record that fails authentication blocks normal reopening, even when a later record supersedes it.
 - **Process memory.** An open store holds the DEK in memory and returns plaintext to its caller. A compromised process, memory dump or swap file may expose sensitive material.
 - **Deletion.** Older values remain in the encrypted log until compaction. Previous copies and backups retain their contents.
@@ -263,7 +305,7 @@ The current version is `0x01`. The magic value, version and algorithm ID are ins
 [Record...]
 ```
 
-The session KEK encrypts the 512-byte header following the session salt and authenticates the UTF-8 string `Hoddmir/0x01/header` as associated data. The DEK wrapper authenticates `Hoddmir/0x01/dek` as associated data. The records use keys derived from the DEK.
+The encrypted header blob contains 496 bytes of ciphertext and a 16-byte authentication tag. The session KEK uses the first 12 bytes of the session salt as its nonce and authenticates the UTF-8 string `Hoddmir/0x01/header` as associated data. The DEK wrapper authenticates `Hoddmir/0x01/dek` as associated data. The records use keys derived from the DEK.
 
 ### Header plaintext (decrypted, padded to 496 bytes with random data)
 
@@ -282,29 +324,44 @@ DekArgonSalt(16)| DekArgonMemKiB(4) | DekArgonIters(4) | DekArgonPar(4)
 [PayloadTag(16)]
 ```
 
-Prefix plaintext (13 bytes):
+The prefix plaintext is 13 bytes.
+
 ```
 Op(1) | KeyLen(4,LE) | ContentLen(4,LE) | PaddedLen(4,LE)
 ```
 
-Payload plaintext:
+The payload plaintext includes up to 64 random padding bytes.
+
 ```
 keyBytes(KeyLen) || value(ContentLen-KeyLen) || random_padding(PaddedLen-ContentLen)
 ```
 
 Operation `0` is a put and `1` is a tombstone with an empty value. The prefix authenticates the absolute record offset as an 8-byte little-endian integer followed by the SHA-256 digest of the previous serialized record. The first record uses the SHA-256 digest of the session salt and encrypted header. The payload authenticates the encrypted prefix and its tag as associated data.
 
+The configured record content limit counts the UTF-8 ID and value together. The reader rejects an oversized authenticated prefix before allocating a buffer for the record body.
+
 ### Index and recovery
 
 Each mutation appends one record. Opening the store authenticates records in file order and rebuilds the in-memory index. A complete record that fails authentication prevents opening. If the final record is incomplete, the store exposes the preceding records and reports the tail via `VerifyAsync`. Call `CompactAsync` to remove the incomplete tail before appending again.
 
-`VerifyAsync` checks that the header and committed log match the open store. A changed header sets `IsHeaderCorrupted`. A valid prefix that differs from the committed log sets `IsLogChanged`. An incomplete header is reported as truncation at offset zero. Verification stops at the first broken link in the log. Compaction and rotation reject a changed header or corrupt committed history. `GetAsync` throws `InvalidDataException` when an indexed record fails validation.
+Replacing a value keeps the same index footprint, and deleting an ID frees its slot and bytes. Writes that would exceed either configured index limit fail before appending. Opening a vault also enforces both limits at each point in its authenticated history.
+
+`VerifyAsync` checks the header and authenticates the log against the state of the open store. `IsHealthy` is true when the complete header and log pass verification and match the committed state.
+
+| Result | Meaning |
+|---|---|
+| `IsHeaderCorrupted` | The complete header differs from the authenticated header. |
+| `IsLogChanged` | A scan without corrupt records found a different committed end offset or checkpoint. |
+| `CorruptedRecords` | A record failed authentication or validation. The scan stops at the first broken link. |
+| `TruncatedOffsets` | The offset of an incomplete record or zero for an incomplete header. |
+
+Compaction and rotation reject changes to the header or committed history. `GetAsync` returns `null` for an absent ID and throws `InvalidDataException` when an indexed record fails validation.
 
 Before appending, the store checks the header and last committed record. The backend then checks the expected offset atomically with the append. Use `VerifyAsync` to check the full history.
 
 ### Credentials
 
-Opening a store requires three independent values:
+Use the same credential settings on every reopen.
 
 | Credential | Default | Notes |
 |---|---|---|
@@ -312,7 +369,7 @@ Opening a store requires three independent values:
 | `sessionIterations` | `2` | Argon2id iterations for the header KEK |
 | `sessionSaltLen` | `16` | Length of the random salt at the start of the file |
 
-All three must match. The salt length and session iterations are **never stored on disk** — they are part of the credentials.
+The caller supplies the session salt length and iteration count.
 
 ---
 
@@ -320,25 +377,25 @@ All three must match. The salt length and session iterations are **never stored 
 
 ### Custom storage backend
 
-Implement `IAppendOnlyStoreProvider` and `IAtomicReplace` to back the store with any storage medium — a database column, a cloud object, a memory-mapped file:
+Custom backends implement [`IAppendOnlyStoreProvider`](src/Hoddmir/Hoddmir.Core/Storage/IAppendOnlyStoreProvider.cs) and [`IAtomicReplace`](src/Hoddmir/Hoddmir.Core/Storage/IAtomicReplace.cs). The implementation must be thread-safe and grant one open store exclusive write access to the underlying data, including during replacement.
 
-```csharp
-public class MyCustomStoreProvider : IAppendOnlyStoreProvider, IAtomicReplace
-{
-    public Task<long> GetLengthAsync(CancellationToken ct = default) { ... }
-    public Task<int>  ReadAtAsync(long offset, Memory<byte> buffer, CancellationToken ct = default) { ... }
-    public Task AppendAsync(ReadOnlyMemory<byte> data, long expectedOffset, CancellationToken ct = default) { ... }
-    public Task       FlushAsync(bool hard = false, CancellationToken ct = default) { ... }
-    public Task       ReplaceWithAsync(Func<Stream, Task> buildNew, CancellationToken ct = default) { ... }
-}
-```
+- `AppendAsync(data, expectedOffset)` compares the current length with `expectedOffset` under the same synchronization used to write. An offset mismatch throws `IOException` before any bytes are appended.
+- `FlushAsync(hard: true)` commits pending writes to durable storage when the backend provides persistence.
+- `ReplaceWithAsync` passes a fresh stream to the build callback and publishes the replacement atomically after staging and flushing it.
 
-`AppendAsync` writes at the end of the store and returns the actual starting offset of that write. Use one open `EncryptedEntryStore` instance per backing store.
 ---
 
 ## Contributing
 
 Pull requests are welcome. For significant changes, please open an issue first to discuss what you would like to change.
+
+### Security regression tests
+
+Run the `VaultSecurity` category from the repository root. It covers tampering, trusted checkpoints, incomplete tails, resource limits, failed rewrites, writer exclusion, and key and nonce uniqueness through rotation.
+
+```bash
+dotnet test src/Hoddmir/Hoddmir.Tests/Hoddmir.Tests.csproj --filter "TestCategory=VaultSecurity"
+```
 
 ---
 

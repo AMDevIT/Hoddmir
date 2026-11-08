@@ -26,6 +26,7 @@ internal sealed class EncryptedRecordCodec
 
     private static readonly UTF8Encoding Utf8 = new(false, true);
     private readonly IAEADProvider aead;
+    private readonly int maxContentLength;
 
     #endregion
 
@@ -33,26 +34,42 @@ internal sealed class EncryptedRecordCodec
 
     private static ReadOnlySpan<byte> PrefixNonce => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     private static ReadOnlySpan<byte> PayloadNonce => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    internal static int MaxSupportedContentLength => Array.MaxLength - RecordOverhead - MaxPadding;
 
     #endregion
 
     #region .ctor
 
-    /// <summary>Creates a codec using the store's AEAD provider.</summary>
-    public EncryptedRecordCodec(IAEADProvider aead) => this.aead = aead;
+    /// <summary>Creates a codec using the store's AEAD provider and record content limit.</summary>
+    public EncryptedRecordCodec(IAEADProvider aead, int maxContentLength)
+    {
+        this.aead = aead;
+        this.maxContentLength = maxContentLength;
+    }
 
     #endregion
 
     #region Methods
 
-    /// <summary>Encrypts a put or tombstone for the specified absolute file offset.</summary>
-    public byte[] Encode(SensitiveBytes dek, long offset, ReadOnlySpan<byte> previousDigest,
-                         string id, ReadOnlySpan<byte> value, bool deleted)
+    /// <summary>Returns the UTF-8 size of an ID that fits within the configured record content limit.</summary>
+    public int GetIdLength(string id)
     {
         int idLength = Utf8.GetByteCount(id);
-        int contentLength = checked(idLength + value.Length);
-        int paddedLength = checked(contentLength + RandomNumberGenerator.GetInt32(MaxPadding + 1));
-        byte[] record = new byte[checked(RecordOverhead + paddedLength)];
+        if (idLength > this.maxContentLength)
+            throw new ArgumentOutOfRangeException(nameof(id), $"The UTF-8 ID exceeds the {this.maxContentLength}-byte record content limit.");
+        return idLength;
+    }
+
+    /// <summary>Encrypts a put or tombstone using the validated UTF-8 byte count of its ID.</summary>
+    public byte[] Encode(SensitiveBytes dek, long offset, ReadOnlySpan<byte> previousDigest,
+                         string id, int idLength, ReadOnlySpan<byte> value, bool deleted)
+    {
+        if (value.Length > this.maxContentLength - idLength)
+            throw new ArgumentOutOfRangeException(nameof(value), $"The UTF-8 ID and value together exceed the {this.maxContentLength}-byte record content limit.");
+
+        int contentLength = idLength + value.Length;
+        int paddedLength = contentLength + RandomNumberGenerator.GetInt32(MaxPadding + 1);
+        byte[] record = new byte[RecordOverhead + paddedLength];
         byte[] payload = new byte[paddedLength];
         Span<byte> recordKey = stackalloc byte[KeyLength];
         Span<byte> prefix = stackalloc byte[PrefixLength];
@@ -166,9 +183,8 @@ internal sealed class EncryptedRecordCodec
             int contentLength = BinaryPrimitives.ReadInt32LittleEndian(plaintext[5..]);
             int paddedLength = BinaryPrimitives.ReadInt32LittleEndian(plaintext[9..]);
 
-            if (operation > 1 || idLength <= 0 || contentLength < idLength ||
+            if (operation > 1 || idLength <= 0 || contentLength < idLength || contentLength > this.maxContentLength ||
                 paddedLength < contentLength || paddedLength - contentLength > MaxPadding ||
-                paddedLength > Array.MaxLength - RecordOverhead ||
                 (operation == 1 && contentLength != idLength))
                 return false;
 
@@ -196,7 +212,7 @@ internal sealed class EncryptedRecordCodec
             byte[]? value = includeValue && !prefix.Deleted
                 ? payload.AsSpan(prefix.IdLength, prefix.ContentLength - prefix.IdLength).ToArray()
                 : null;
-            return new(ReadStatus.Valid, length, id, prefix.Deleted, value, ComputeDigest(header, body));
+            return new(ReadStatus.Valid, length, id, prefix.Deleted, value, ComputeDigest(header, body), prefix.IdLength);
         }
         catch (DecoderFallbackException)
         {
@@ -236,7 +252,8 @@ internal sealed class EncryptedRecordCodec
     internal enum ReadStatus { Valid, Truncated, Corrupt }
 
     internal readonly record struct RecordRead(ReadStatus Status, int Length = 0, string? Id = null,
-                                               bool Deleted = false, byte[]? Value = null, byte[]? Digest = null);
+                                               bool Deleted = false, byte[]? Value = null, byte[]? Digest = null,
+                                               int IdLength = 0);
 
     private readonly record struct RecordPrefix(bool Deleted, int IdLength, int ContentLength, int PaddedLength);
 }

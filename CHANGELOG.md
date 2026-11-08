@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `VerifyAsync` reports corrupt records, incomplete writes and changes to the authenticated header.
+- `WithResourceLimits` configures the active ID count, aggregate UTF-8 ID bytes and record content size per store session.
 - Added explicit creation and opening modes and support for trusted log checkpoints across reopen.
 - `Hoddmir.BouncyCastle` includes its README, license and icon. It provides explicit selection of ChaCha20-Poly1305 and AES-GCM. The Bouncy Castle and .NET AES-GCM providers share the same store algorithm ID.
 
@@ -30,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reject replayed records that break the authenticated chain. Verification detects changes to the committed log while open and omits plaintext IDs from diagnostic logs.
 - Refuse a second attachment to the same backend and keep the file writer lock across replacement.
 - Reject appends when the header, last committed record, or expected append offset has changed.
+- Reject records exceeding the configured content limit before allocating a body buffer.
+- Enforce the configured live index limits during writes and reopen.
 - Compaction and key rotation reject corrupt committed history before replacement. Reading a corrupted indexed record raises an error.
 
 ### Known limitations

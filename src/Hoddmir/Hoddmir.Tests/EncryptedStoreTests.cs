@@ -3,6 +3,7 @@ using Hoddmir.Core.Encryption.AEAD;
 using Hoddmir.Core.Keys;
 using Hoddmir.Storage;
 using Hoddmir.Storage.Providers;
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
@@ -31,14 +32,19 @@ public sealed class EncryptedStoreTests
                                                                         bool createNew = true)
         where TBackend : IAppendOnlyStoreProvider, IAtomicReplace
     {
-        EncryptedEntryStore.StoreBuilder builder = EncryptedEntryStore.Configure()
+        EncryptedEntryStore.StoreBuilder builder = ConfigureTestStore(aead, password, sessionIters, sessionSaltLen);
+        return createNew ? builder.CreateAsync(backend, backend) : builder.OpenAsync(backend, backend);
+    }
+
+    /// <summary>Prepares a test builder with reduced KDF parameters.</summary>
+    private static EncryptedEntryStore.StoreBuilder ConfigureTestStore(IAEADProvider aead, byte[]? password = null,
+                                                                       int sessionIters = 1, int sessionSaltLen = 16) =>
+        EncryptedEntryStore.Configure()
             .WithPassword(password ?? Password)
             .WithSessionIterations(sessionIters)
             .WithSessionSaltLength(sessionSaltLen)
             .WithDekArgon2id(FastDekArgon)
             .WithAead(aead);
-        return createNew ? builder.CreateAsync(backend, backend) : builder.OpenAsync(backend, backend);
-    }
 
     // ── Round-trip ───────────────────────────────────────────────────────────
 
@@ -359,17 +365,18 @@ public sealed class EncryptedStoreTests
             "Two stores with same password must produce different ciphertext.");
     }
 
-    /// <summary>Checks the actual AEAD inputs across writes, reopen and compaction.</summary>
+    /// <summary>Checks the actual AEAD inputs across writes, reopen, compaction and key rotation.</summary>
     [TestMethod]
+    [TestCategory("VaultSecurity")]
     [DynamicData(nameof(Providers), DynamicDataSourceType.Method)]
-    public async Task RecordKeyNoncePairs_AreUniqueAcrossReopenAndCompaction(IAEADProvider aead)
+    public async Task KeyNoncePairs_AreUniqueAcrossReopenCompactionAndRotation(IAEADProvider aead)
     {
         RecordingAead recorder = new(aead);
         MemoryAppendOnlyStoreProvider backend = new();
+        byte[] newPassword = "rotated-test-password"u8.ToArray();
 
         await using (EncryptedEntryStore store = await CreateStoreAsync(backend, recorder))
         {
-            recorder.Encryptions.Clear();
             await store.PutAsync("keep", "first"u8.ToArray());
             await store.PutAsync("gone", "second"u8.ToArray());
             await store.DeleteAsync("gone");
@@ -380,10 +387,17 @@ public sealed class EncryptedStoreTests
             await store.PutAsync("new", "third"u8.ToArray());
             await store.CompactAsync();
             Assert.IsNull(await store.GetAsync("gone"));
+            await store.RotateDekAsync(Password, newPasswordUtf8: newPassword, newDekArgonParams: FastDekArgon);
         }
 
-        Assert.AreEqual(12, recorder.Encryptions.Count);
-        Assert.AreEqual(12, recorder.Encryptions.Distinct(StringComparer.Ordinal).Count());
+        await Assert.ThrowsExactlyAsync<CryptographicException>(() => CreateStoreAsync(backend, aead, createNew: false));
+        await using EncryptedEntryStore reopened = await CreateStoreAsync(backend, aead, newPassword, createNew: false);
+        CollectionAssert.AreEqual("first"u8.ToArray(), await reopened.GetAsync("keep"));
+        CollectionAssert.AreEqual("third"u8.ToArray(), await reopened.GetAsync("new"));
+        Assert.IsNull(await reopened.GetAsync("gone"));
+
+        Assert.AreEqual(20, recorder.Encryptions.Count);
+        Assert.AreEqual(recorder.Encryptions.Count, recorder.Encryptions.Distinct(StringComparer.Ordinal).Count());
     }
 
     /// <summary>Checks file offsets after random reads and concurrent store operations.</summary>
@@ -712,6 +726,147 @@ public sealed class EncryptedStoreTests
         Assert.AreEqual(1, ids.Count);
     }
 
+    /// <summary>Enforces the combined UTF-8 ID and value limit and accepts the exact boundary.</summary>
+    [TestMethod]
+    public async Task RecordContentLimit_CountsUtf8Bytes()
+    {
+        MemoryAppendOnlyStoreProvider backend = new();
+        AesGcmProvider aead = new();
+        byte[] value = new byte[16 * 1024 * 1024 - 1];
+        value[^1] = 42;
+
+        await using (EncryptedEntryStore store = await CreateStoreAsync(backend, aead))
+        {
+            long initialLength = await backend.GetLengthAsync();
+            await Assert.ThrowsExactlyAsync<ArgumentOutOfRangeException>(() => store.PutAsync("é", value));
+            Assert.AreEqual(initialLength, await backend.GetLengthAsync());
+            await store.PutAsync("a", value);
+        }
+
+        await using EncryptedEntryStore reopened = await CreateStoreAsync(backend, aead, createNew: false);
+        byte[]? read = await reopened.GetAsync("a");
+        Assert.IsTrue(value.AsSpan().SequenceEqual(read));
+    }
+
+    /// <summary>Checks a raised record limit on creation, reopen and compaction.</summary>
+    [TestMethod]
+    [DoNotParallelize]
+    public async Task ConfiguredRecordLimit_AllowsLargerRecords()
+    {
+        const int maxRecordContentBytes = 16 * 1024 * 1024 + 1;
+        MemoryAppendOnlyStoreProvider backend = new();
+        AesGcmProvider aead = new();
+        EncryptedEntryStore.StoreBuilder builder = ConfigureTestStore(aead)
+            .WithResourceLimits(maxRecordContentBytes: maxRecordContentBytes);
+        byte[] value = new byte[maxRecordContentBytes - 1];
+        value[^1] = 42;
+
+        await using (EncryptedEntryStore store = await builder.CreateAsync(backend, backend))
+        {
+            await Assert.ThrowsExactlyAsync<ArgumentOutOfRangeException>(() => store.PutAsync("é", value));
+            await store.PutAsync("a", value);
+        }
+
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => CreateStoreAsync(backend, aead, createNew: false));
+        await using EncryptedEntryStore reopened = await builder.OpenAsync(backend, backend);
+        await reopened.CompactAsync();
+        byte[]? read = await reopened.GetAsync("a");
+        Assert.IsTrue(value.AsSpan().SequenceEqual(read));
+        Assert.IsTrue((await reopened.VerifyAsync()).IsHealthy);
+    }
+
+    /// <summary>Rejects disabled limits and limits above the representable record size.</summary>
+    [TestMethod]
+    public void ResourceLimits_RejectInvalidValues()
+    {
+        EncryptedEntryStore.StoreBuilder builder = EncryptedEntryStore.Configure();
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => builder.WithResourceLimits(maxIndexedIds: 0));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => builder.WithResourceLimits(maxIndexedIdBytes: 0));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => builder.WithResourceLimits(maxRecordContentBytes: 0));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => builder.WithResourceLimits(maxRecordContentBytes: int.MaxValue));
+    }
+
+    /// <summary>Rejects an authenticated oversized prefix before treating its body as an incomplete tail.</summary>
+    [TestMethod]
+    public async Task OversizedAuthenticatedPrefix_IsRejectedOnOpen()
+    {
+        MemoryAppendOnlyStoreProvider backend = new();
+        AesGcmProvider aead = new();
+        RecordingAead oversizedPrefix = new(aead, prefixContentLength: int.MaxValue - 1024);
+
+        await using (EncryptedEntryStore store = await CreateStoreAsync(backend, oversizedPrefix))
+            await store.PutAsync("id", "synthetic value"u8.ToArray());
+
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => CreateStoreAsync(backend, aead, createNew: false));
+    }
+
+    /// <summary>Preserves the ID count limit across reopen and releases a slot on deletion.</summary>
+    [TestMethod]
+    public async Task IndexIdCountLimit_IsEnforcedAfterReopen()
+    {
+        const int maxIndexedIds = 65_536;
+        MemoryAppendOnlyStoreProvider backend = new();
+        AesGcmProvider aead = new();
+
+        await using (EncryptedEntryStore store = await CreateStoreAsync(backend, aead))
+        {
+            for (int i = 0; i < maxIndexedIds; i++)
+                await store.PutAsync($"id-{i}", ReadOnlyMemory<byte>.Empty);
+        }
+
+        await using (EncryptedEntryStore reopened = await CreateStoreAsync(backend, aead, createNew: false))
+        {
+            long length = await backend.GetLengthAsync();
+            await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => reopened.PutAsync("extra", ReadOnlyMemory<byte>.Empty));
+            Assert.AreEqual(length, await backend.GetLengthAsync());
+            await reopened.PutAsync("id-0", "updated"u8.ToArray());
+            await reopened.DeleteAsync("id-0");
+            await reopened.PutAsync("extra", ReadOnlyMemory<byte>.Empty);
+            Assert.AreEqual(maxIndexedIds, reopened.ListIds().Count);
+        }
+
+        await using EncryptedEntryStore expanded = await ConfigureTestStore(aead)
+            .WithResourceLimits(maxIndexedIds: maxIndexedIds + 1)
+            .OpenAsync(backend, backend);
+        await expanded.PutAsync("additional", ReadOnlyMemory<byte>.Empty);
+        Assert.AreEqual(maxIndexedIds + 1, expanded.ListIds().Count);
+    }
+
+    /// <summary>Bounds aggregate UTF-8 ID bytes in both normal writes and an authenticated imported log.</summary>
+    [TestMethod]
+    [DoNotParallelize]
+    public async Task IndexIdByteLimit_RejectsWritesAndImportedRecords()
+    {
+        MemoryAppendOnlyStoreProvider backend = new();
+        AesGcmProvider aead = new();
+        RecordingAead recorder = new(aead);
+        string suffix = new('é', 4 * 1024 * 1024);
+        string first = "a" + suffix;
+        string second = "b" + suffix;
+
+        await using (EncryptedEntryStore store = await CreateStoreAsync(backend, recorder))
+        {
+            await store.PutAsync(first, ReadOnlyMemory<byte>.Empty);
+            long length = await backend.GetLengthAsync();
+            await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => store.PutAsync(second, ReadOnlyMemory<byte>.Empty));
+            Assert.AreEqual(length, await backend.GetLengthAsync());
+            await store.DeleteAsync(first);
+            await store.PutAsync(second, ReadOnlyMemory<byte>.Empty);
+
+            // Authenticate a second distinct ID in the log while the writer sees an overwrite.
+            recorder.ReplacementFirstIdByte = (byte)'a';
+            await store.PutAsync(second, ReadOnlyMemory<byte>.Empty);
+        }
+
+        InvalidDataException error = await Assert.ThrowsExactlyAsync<InvalidDataException>(() => CreateStoreAsync(backend, aead, createNew: false));
+        StringAssert.Contains(error.Message, "exceeds the live index limits");
+
+        await using EncryptedEntryStore expanded = await ConfigureTestStore(aead)
+            .WithResourceLimits(maxIndexedIdBytes: 16 * 1024 * 1024 + 2)
+            .OpenAsync(backend, backend);
+        Assert.AreEqual(2, expanded.ListIds().Count);
+    }
+
     // ── VerifyAsync ───────────────────────────────────────────────────────────
 
     [TestMethod]
@@ -745,12 +900,14 @@ public sealed class EncryptedStoreTests
         #region Fields
 
         private readonly IAEADProvider inner;
+        private readonly int? prefixContentLength;
 
         #endregion
 
         #region Properties
 
         public List<string> Encryptions { get; } = [];
+        public byte? ReplacementFirstIdByte { get; set; }
         public string Name => this.inner.Name;
         public int KeySizeBytes => this.inner.KeySizeBytes;
         public int NonceSizeBytes => this.inner.NonceSizeBytes;
@@ -760,8 +917,12 @@ public sealed class EncryptedStoreTests
 
         #region .ctor
 
-        /// <summary>Wraps the provider used by the store without changing its algorithm ID.</summary>
-        public RecordingAead(IAEADProvider inner) => this.inner = inner;
+        /// <summary>Wraps the provider and optionally authenticates a different record length.</summary>
+        public RecordingAead(IAEADProvider inner, int? prefixContentLength = null)
+        {
+            this.inner = inner;
+            this.prefixContentLength = prefixContentLength;
+        }
 
         #endregion
 
@@ -772,6 +933,28 @@ public sealed class EncryptedStoreTests
                             ReadOnlySpan<byte> plaintext, Span<byte> ciphertext, Span<byte> tag)
         {
             this.Encryptions.Add(Convert.ToHexString(SHA256.HashData(key)) + Convert.ToHexString(nonce));
+            if (this.prefixContentLength is int length && aad.Length == sizeof(long) + 32 && plaintext.Length == 13)
+            {
+                Span<byte> prefix = stackalloc byte[13];
+                plaintext.CopyTo(prefix);
+                BinaryPrimitives.WriteInt32LittleEndian(prefix[5..], length);
+                BinaryPrimitives.WriteInt32LittleEndian(prefix[9..], length);
+                this.inner.Encrypt(key, nonce, aad, prefix, ciphertext, tag);
+                return;
+            }
+
+            if (this.ReplacementFirstIdByte is byte replacement && aad.Length == 29 && nonce[^1] == 1)
+            {
+                byte[] payload = plaintext.ToArray();
+                try
+                {
+                    payload[0] = replacement;
+                    this.inner.Encrypt(key, nonce, aad, payload, ciphertext, tag);
+                }
+                finally { CryptographicOperations.ZeroMemory(payload); }
+                return;
+            }
+
             this.inner.Encrypt(key, nonce, aad, plaintext, ciphertext, tag);
         }
 
