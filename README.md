@@ -227,7 +227,7 @@ await store.RotateDekAsync(currentPasswordUtf8: Encoding.UTF8.GetBytes("old-pass
 
 ### Compaction
 
-The store is append-only. A delete appends a tombstone, and an overwrite appends the new value. Call `CompactAsync` to reclaim the space occupied by old records.
+The store is append-only. Deleting an active ID appends a tombstone, and an overwrite appends the new value. Deleting an absent ID is a no-op. Call `CompactAsync` to reclaim the space occupied by old records.
 
 ```csharp
 await store.CompactAsync();

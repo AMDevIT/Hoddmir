@@ -125,9 +125,21 @@ public sealed class EncryptedStoreTests
         await using var store = await CreateStoreAsync(ms, aead);
 
         await store.PutAsync("a", Encoding.UTF8.GetBytes("A"));
-        await store.DeleteAsync("does-not-exist"); // must not throw
+        long length = await ms.GetLengthAsync();
+        byte[] checkpoint = await store.GetCheckpointAsync();
+
+        await store.DeleteAsync("does-not-exist");
+        await store.DeleteAsync("does-not-exist");
 
         Assert.IsNotNull(await store.GetAsync("a"));
+        Assert.AreEqual(length, await ms.GetLengthAsync());
+        CollectionAssert.AreEqual(checkpoint, await store.GetCheckpointAsync());
+
+        await store.DeleteAsync("a");
+        length = await ms.GetLengthAsync();
+        await store.DeleteAsync("a");
+        Assert.AreEqual(length, await ms.GetLengthAsync());
+        Assert.IsNull(await store.GetAsync("a"));
     }
 
     // ── Compact ──────────────────────────────────────────────────────────────

@@ -122,7 +122,7 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
         finally { this.gate.Release(); }
     }
 
-    /// <summary>Appends a tombstone for the specified ID.</summary>
+    /// <summary>Deletes an active ID by appending a tombstone.</summary>
     public Task DeleteAsync(string id, CancellationToken ct = default) =>
         string.IsNullOrEmpty(id) ? Task.CompletedTask : this.AppendRecordAsync(id, ReadOnlyMemory<byte>.Empty, deleted: true, ct);
 
@@ -333,6 +333,9 @@ public sealed class EncryptedEntryStore : IAsyncDisposable
             this.EnsureUsable();
             if (this.incompleteTail)
                 throw new InvalidDataException("Compact the store to remove its incomplete tail before appending.");
+
+            if (deleted && !this.index.ContainsKey(id))
+                return;
 
             int idLength = this.codec.GetIdLength(id);
             int updatedIdBytes = this.GetUpdatedIndexSize(id, idLength, deleted)

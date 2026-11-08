@@ -116,3 +116,19 @@
 - Affected files. README.md and the [documentation note](readme-vault-api-alignment.md).
 - Checks. Verified source signatures and test category, parsed all C# examples with Roslyn, checked multiline argument alignment, and ran git diff --check. Restore, build, and tests were outside this documentation update.
 - Next step. Run the VaultSecurity test category when authorized.
+
+## GitHub vault security check
+
+- Objective and status. Checked two GitHub revisions in isolated local copies with synthetic vaults.
+- Decisions. Verify the remote references before testing exact source exports. Provide the binary result requested by the user.
+- Affected files. The [audit scope note](github-vault-security-check.md) and this context.
+- Checks. Restore, build, repository test commands, NuGet advisory queries and isolated probes completed on Windows.
+- Open issues. Results apply to the verified revisions and tested environment.
+
+## Vault audit follow-up
+
+- Objective and status. Applied and verified the targeted audit correction on the local Task-AddAISupport branch.
+- Decisions. Preserve format 0x01 and use the existing store lock.
+- Affected files. Core storage, the integration tests, README.md, and the [follow-up note](vault-audit-follow-up.md).
+- Checks. Restore, build, the full test suite, and isolated probes succeeded on .NET 9 and .NET 10.
+- Next step. Integrate the corrected branch into the GitHub default branch.
