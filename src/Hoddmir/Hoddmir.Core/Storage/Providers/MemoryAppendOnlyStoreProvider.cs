@@ -31,18 +31,19 @@ public sealed class MemoryAppendOnlyStoreProvider : IAppendOnlyStoreProvider, IA
     }
 
     /// <inheritdoc />
-    public async Task<long> AppendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default)
+    public async Task AppendAsync(ReadOnlyMemory<byte> data, long expectedOffset, CancellationToken ct = default)
     {
         await _sem.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             long offset = this._len;
+            if (offset != expectedOffset)
+                throw new IOException("The backend length changed before append.");
             int need = checked((int)(offset + data.Length));
             if (this._buf.Length < need)
                 Array.Resize(ref this._buf, Math.Max(need, this._buf.Length == 0 ? 1024 : this._buf.Length * 2));
             data.Span.CopyTo(this._buf.AsSpan((int)offset, data.Length));
             this._len = need;
-            return offset;
         }
         finally { _sem.Release(); }
     }

@@ -9,7 +9,8 @@ public interface IAppendOnlyStoreProvider
 {
     Task<long> GetLengthAsync(CancellationToken ct = default);
     Task<int>  ReadAtAsync(long offset, Memory<byte> buffer, CancellationToken ct = default);
-    /// <summary>Appends the data and returns its starting offset.</summary>
-    Task<long> AppendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default);
+    /// <summary>Appends only if the current length matches the expected offset.</summary>
+    /// <exception cref="IOException">The expected offset differs from the current length. No bytes were appended.</exception>
+    Task AppendAsync(ReadOnlyMemory<byte> data, long expectedOffset, CancellationToken ct = default);
     Task       FlushAsync(bool hard = false, CancellationToken ct = default);
 }

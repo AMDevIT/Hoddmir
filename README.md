@@ -85,7 +85,7 @@ using Hoddmir.Storage;
 using Hoddmir.Storage.Providers;
 using System.Text;
 
-await using var fileStore = new FileAppendOnlyStoreProvider("vault.bin");
+await using var fileStore = new FileAppendOnlyStoreProvider("vault.bin", FileMode.CreateNew);
 
 await using var store = await EncryptedEntryStore.Configure()
     .WithPassword(Encoding.UTF8.GetBytes("my-strong-password"))
@@ -93,7 +93,7 @@ await using var store = await EncryptedEntryStore.Configure()
     // Optional: override session credentials (must match on every reopen)
     // .WithSessionIterations(3)
     // .WithSessionSaltLength(32)
-    .OpenAsync(fileStore, fileStore);
+    .CreateAsync(fileStore, fileStore);
 
 // Store a blob
 await store.PutAsync("images/avatar.png", File.ReadAllBytes("avatar.png"));
@@ -132,7 +132,7 @@ var memStore = new MemoryAppendOnlyStoreProvider();
 await using var store = await EncryptedEntryStore.Configure()
     .WithPassword(Encoding.UTF8.GetBytes("my-strong-password"))
     .WithAead(new AesCtrHmacSha256Provider())
-    .OpenAsync(memStore, memStore);
+    .CreateAsync(memStore, memStore);
 
 await store.PutAsync("session/token", Encoding.UTF8.GetBytes("Bearer eyJ..."));
 ```
@@ -140,16 +140,16 @@ await store.PutAsync("session/token", Encoding.UTF8.GetBytes("Bearer eyJ..."));
 ### Reopen an existing store
 
 To reopen a store, use the same password, session parameters and a compatible AEAD provider.
-Use `OpenExistingAsync` to reject an empty backend and `CreateAsync` to reject a nonempty one. The file backend keeps a sibling `.lock` file to exclude another writer during file replacement. Keep this lock file in place while any backend for the vault may be open.
+`OpenAsync` requires an initialized vault. To create one, use `CreateAsync` on an empty backend. The file backend opens existing files by default. Pass `FileMode.CreateNew` to create a file at an unused path. The backend keeps a sibling `.lock` file to exclude another writer during file replacement. Keep this lock file in place while any backend for the vault may be open.
 
 ```csharp
 // First session
-await using (var fileStore = new FileAppendOnlyStoreProvider("vault.bin"))
+await using (var fileStore = new FileAppendOnlyStoreProvider("vault.bin", FileMode.CreateNew))
 {
     await using var store = await EncryptedEntryStore.Configure()
         .WithPassword(password)
         .WithAead(new AesGcmProvider())
-        .OpenAsync(fileStore, fileStore);
+        .CreateAsync(fileStore, fileStore);
 
     await store.PutAsync("report/q3.pdf", pdfBytes);
 }
@@ -178,7 +178,7 @@ await using var store = await EncryptedEntryStore.Configure()
     .WithPassword(passwordBytes)
     .WithDekArgon2id(argonParams)
     .WithAead(new AesGcmProvider())
-    .OpenAsync(fileStore, fileStore);
+    .CreateAsync(fileStore, fileStore);
 ```
 
 ### Key rotation
@@ -300,6 +300,8 @@ Each mutation appends one record. Opening the store authenticates records in fil
 
 `VerifyAsync` checks that the header and committed log match the open store. A changed header sets `IsHeaderCorrupted`. A valid prefix that differs from the committed log sets `IsLogChanged`. An incomplete header is reported as truncation at offset zero. Verification stops at the first broken link in the log. Compaction and rotation reject a changed header or corrupt committed history. `GetAsync` throws `InvalidDataException` when an indexed record fails validation.
 
+Before appending, the store checks the header and last committed record. The backend then checks the expected offset atomically with the append. Use `VerifyAsync` to check the full history.
+
 ### Credentials
 
 Opening a store requires three independent values:
@@ -325,7 +327,7 @@ public class MyCustomStoreProvider : IAppendOnlyStoreProvider, IAtomicReplace
 {
     public Task<long> GetLengthAsync(CancellationToken ct = default) { ... }
     public Task<int>  ReadAtAsync(long offset, Memory<byte> buffer, CancellationToken ct = default) { ... }
-    public Task<long> AppendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default) { ... }
+    public Task AppendAsync(ReadOnlyMemory<byte> data, long expectedOffset, CancellationToken ct = default) { ... }
     public Task       FlushAsync(bool hard = false, CancellationToken ct = default) { ... }
     public Task       ReplaceWithAsync(Func<Stream, Task> buildNew, CancellationToken ct = default) { ... }
 }

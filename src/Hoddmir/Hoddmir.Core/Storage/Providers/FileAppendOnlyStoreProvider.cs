@@ -22,15 +22,20 @@ public sealed class FileAppendOnlyStoreProvider
 
     #region .ctor
 
-    public FileAppendOnlyStoreProvider(string path)
+    /// <summary>Opens an existing vault file or creates an empty file with <see cref="FileMode.CreateNew"/>.</summary>
+    public FileAppendOnlyStoreProvider(string path, FileMode mode = FileMode.Open)
     {
+        if (mode is not (FileMode.Open or FileMode.CreateNew))
+            throw new ArgumentOutOfRangeException(nameof(mode));
+
         this.path = Path.GetFullPath(path);
-        Directory.CreateDirectory(Path.GetDirectoryName(this.path)!);
+        if (mode == FileMode.CreateNew)
+            Directory.CreateDirectory(Path.GetDirectoryName(this.path)!);
         // The lock file must keep the same identity across vault replacements and reopenings.
         this.writerLock = new(this.path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         try
         {
-            this.fs = OpenStream(this.path, FileMode.OpenOrCreate);
+            this.fs = OpenStream(this.path, mode);
         }
         catch
         {
@@ -68,15 +73,16 @@ public sealed class FileAppendOnlyStoreProvider
     }
 
     /// <inheritdoc />
-    public async Task<long> AppendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default)
+    public async Task AppendAsync(ReadOnlyMemory<byte> data, long expectedOffset, CancellationToken ct = default)
     {
         await semaphore.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             long offset = this.fs.Length;
+            if (offset != expectedOffset)
+                throw new IOException("The backend length changed before append.");
             this.fs.Position = offset;
             await this.fs.WriteAsync(data, ct).ConfigureAwait(false);
-            return offset;
         }
         finally { semaphore.Release(); }
     }
@@ -135,7 +141,7 @@ public sealed class FileAppendOnlyStoreProvider
     }
 
     private static FileStream OpenStream(string path, FileMode mode) =>
-        new(path, mode, FileAccess.ReadWrite, FileShare.None, 4096,
+        new(path, mode, FileAccess.ReadWrite, FileShare.None, 1,
             FileOptions.Asynchronous | FileOptions.WriteThrough | FileOptions.RandomAccess);
 
     private static void TryDelete(string p) 

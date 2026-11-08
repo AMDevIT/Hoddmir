@@ -60,3 +60,11 @@
 - Affected files. Core storage and crypto, Bouncy Castle providers, tests, README.md, CHANGELOG.md, and the [security audit note](security-audit-format-01.md).
 - Checks. Restore and build succeeded. All 164 MSTest cases passed on each of .NET 9 and .NET 10. The four-provider attack matrix passed on both targets.
 - Next step. Verify filesystem behavior on supported Unix platforms and have the cryptographic design independently reviewed.
+
+## Vault opening and append integrity
+
+- Objective and status. Separated opening and creation, and added append preconditions. Format 0x01 is unchanged.
+- Decisions. Verify the header and last record before writing. Compare the expected offset atomically with append.
+- Affected files. Core storage, both built-in backends, the console app helper, MSTest, README.md, CHANGELOG.md, and the [follow-up note](vault-opening-and-append-integrity.md).
+- Checks. Restore, build, and the console file lifecycle succeeded. All 165 tests passed on each of .NET 9 and .NET 10.
+- Next step. Verify filesystem behavior on supported Unix platforms.

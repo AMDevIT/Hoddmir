@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The development format stays at `0x01`. Each mutation authenticates the previous record's digest, and the header and DEK wrapper authenticate distinct context labels.
 - Argon2id protects the header and wraps the data key. PBKDF2, DPAPI and automatic provider registration are no longer part of the current API.
-- `IAppendOnlyStoreProvider.AppendAsync` now returns the actual write offset as `Task<long>`. Custom providers must implement the updated signature.
+- `OpenAsync` requires an existing initialized vault. Use `CreateAsync` for new vaults and `FileMode.CreateNew` for new file backends.
+- `IAppendOnlyStoreProvider.AppendAsync` checks the expected offset before writing under the same synchronization as the append. Custom providers must implement the updated signature.
 - Stores created by earlier development builds must be recreated.
 
 ### Fixed
@@ -28,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - AES-CTR + HMAC authenticates the lengths of the AAD and ciphertext. Data authenticated by the previous implementation must be recreated.
 - Reject replayed records that break the authenticated chain. Verification detects changes to the committed log while open and omits plaintext IDs from diagnostic logs.
 - Refuse a second attachment to the same backend and keep the file writer lock across replacement.
+- Reject appends when the header, last committed record, or expected append offset has changed.
 - Compaction and key rotation reject corrupt committed history before replacement. Reading a corrupted indexed record raises an error.
 
 ### Known limitations

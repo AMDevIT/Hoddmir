@@ -21,15 +21,18 @@ public sealed class VerifyAsyncTests
     // v0x01 header occupies sessionSaltLen(16) + EncryptedHeaderSize(512) = 528 bytes.
     private const int HeaderSize = 16 + 512;
 
-    private static Task<EncryptedEntryStore> CreateStoreAsync(
-        MemoryAppendOnlyStoreProvider ms, IAEADProvider aead) =>
-        EncryptedEntryStore.Configure()
+    /// <summary>Creates or reopens a test vault with reduced KDF parameters.</summary>
+    private static Task<EncryptedEntryStore> CreateStoreAsync(MemoryAppendOnlyStoreProvider ms, IAEADProvider aead,
+                                                              bool createNew = true)
+    {
+        EncryptedEntryStore.StoreBuilder builder = EncryptedEntryStore.Configure()
             .WithPassword(Password)
             .WithSessionIterations(1)
             .WithSessionSaltLength(16)
             .WithDekArgon2id(FastArgon)
-            .WithAead(aead)
-            .OpenAsync(ms, ms);
+            .WithAead(aead);
+        return createNew ? builder.CreateAsync(ms, ms) : builder.OpenAsync(ms, ms);
+    }
 
     // ── Happy path ───────────────────────────────────────────────────────────
 
@@ -168,6 +171,7 @@ public sealed class VerifyAsyncTests
         Assert.IsFalse(result.IsHealthy);
         Assert.AreEqual(1, result.ValidRecords);
         Assert.AreEqual(0, result.CorruptedRecords);
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.PutAsync("new", "value"u8.ToArray()));
         await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.CompactAsync());
         await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.RotateDekAsync(Password));
     }
@@ -230,11 +234,12 @@ public sealed class VerifyAsyncTests
         Assert.IsFalse(result.IsHealthy);
         Assert.AreEqual(1, result.CorruptedRecords);
         Assert.AreEqual(0, result.TruncatedRecords);
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.PutAsync("new", "value"u8.ToArray()));
         await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.CompactAsync());
         Assert.AreEqual(length, await ms.GetLengthAsync());
         await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.GetAsync("victim"));
         await store.DisposeAsync();
-        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => CreateStoreAsync(ms, aead));
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => CreateStoreAsync(ms, aead, createNew: false));
     }
 
     [TestMethod]

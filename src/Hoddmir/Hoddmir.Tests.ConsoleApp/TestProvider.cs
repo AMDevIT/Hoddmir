@@ -1,4 +1,4 @@
-﻿using Hoddmir.BouncyCastle.Encryption.AEAD;
+using Hoddmir.BouncyCastle.Encryption.AEAD;
 using Hoddmir.Core.Encryption.AEAD;
 using Hoddmir.Core.Keys;
 using Hoddmir.Keys;
@@ -56,9 +56,9 @@ namespace Hoddmir.Tests.ConsoleApp
             try
             {
                 Console.WriteLine($"Creating the test store with {createAead.Name}.");
-                await using (FileAppendOnlyStoreProvider backend = new(path))
-                await using (EncryptedEntryStore store = await CreateStoreAsync(backend, createAead, TestPassword,
-                                                                                fastArgon, cancellationToken))
+                await using (FileAppendOnlyStoreProvider backend = new(path, FileMode.CreateNew))
+                await using (EncryptedEntryStore store = await CreateOrOpenStoreAsync(backend, createAead, TestPassword,
+                                                                                      fastArgon, cancellationToken, createNew: true))
                 {
                     await store.PutAsync(key, initialValue, cancellationToken);
                     await store.PutAsync(deletedKey, temporaryValue, cancellationToken);
@@ -68,8 +68,8 @@ namespace Hoddmir.Tests.ConsoleApp
 
                 Console.WriteLine($"Reopening with {reopenAead.Name} to append, update, delete and compact.");
                 await using (FileAppendOnlyStoreProvider backend = new(path))
-                await using (EncryptedEntryStore store = await CreateStoreAsync(backend, reopenAead, TestPassword,
-                                                                                fastArgon, cancellationToken))
+                await using (EncryptedEntryStore store = await CreateOrOpenStoreAsync(backend, reopenAead, TestPassword,
+                                                                                      fastArgon, cancellationToken))
                 {
                     await VerifyStoreAsync(store, 3, cancellationToken, (key, firstUpdate), (deletedKey, temporaryValue));
                     await store.PutAsync(reopenedKey, reopenedValue, cancellationToken);
@@ -93,9 +93,9 @@ namespace Hoddmir.Tests.ConsoleApp
                 {
                     try
                     {
-                        await using EncryptedEntryStore unexpectedStore = await CreateStoreAsync(backend, reopenAead,
-                                                                                                 TestPassword, fastArgon,
-                                                                                                 cancellationToken);
+                        await using EncryptedEntryStore unexpectedStore = await CreateOrOpenStoreAsync(backend, reopenAead,
+                                                                                                       TestPassword, fastArgon,
+                                                                                                       cancellationToken);
                         throw new InvalidDataException("The previous password still opens the rotated store.");
                     }
                     catch (CryptographicException)
@@ -103,8 +103,8 @@ namespace Hoddmir.Tests.ConsoleApp
                         Console.WriteLine("The previous password was rejected.");
                     }
 
-                    await using EncryptedEntryStore store = await CreateStoreAsync(backend, reopenAead, rotatedPassword,
-                                                                                   fastArgon, cancellationToken);
+                    await using EncryptedEntryStore store = await CreateOrOpenStoreAsync(backend, reopenAead, rotatedPassword,
+                                                                                         fastArgon, cancellationToken);
                     await VerifyStoreAsync(store, 2, cancellationToken, (key, secondUpdate), (reopenedKey, reopenedValue));
 
                     Console.WriteLine("Appending and deleting after reopening with the new password.");
@@ -114,8 +114,8 @@ namespace Hoddmir.Tests.ConsoleApp
 
                 Console.WriteLine("Reopening to verify the final state.");
                 await using (FileAppendOnlyStoreProvider backend = new(path))
-                await using (EncryptedEntryStore store = await CreateStoreAsync(backend, reopenAead, rotatedPassword,
-                                                                                fastArgon, cancellationToken))
+                await using (EncryptedEntryStore store = await CreateOrOpenStoreAsync(backend, reopenAead, rotatedPassword,
+                                                                                      fastArgon, cancellationToken))
                 {
                     await VerifyStoreAsync(store, 4, cancellationToken, (key, secondUpdate), (rotatedKey, rotatedValue));
                     if (await store.GetAsync(deletedKey, cancellationToken) is not null ||
@@ -140,18 +140,18 @@ namespace Hoddmir.Tests.ConsoleApp
 
             IArgon2idParamsProvider argon2Provider;
             ChaCha20Poly1305Provider aead = new();
-            await using FileAppendOnlyStoreProvider provider = new (TestFilePath);
+            await using FileAppendOnlyStoreProvider provider = new(TestFilePath, FileMode.CreateNew);
 
             if (useFastArgon)
                 argon2Provider = fastArgon;
             else
                 argon2Provider = new CalibratingArgon2idParamsProvider();
 
-            await using EncryptedEntryStore store = await CreateStoreAsync(provider, 
-                                                                           aead, 
-                                                                           TestPassword, 
-                                                                           argon2Provider, 
-                                                                           cancellationToken);
+            await using EncryptedEntryStore store = await CreateOrOpenStoreAsync(provider,
+                                                                                 aead,
+                                                                                 TestPassword,
+                                                                                 argon2Provider,
+                                                                                 cancellationToken, createNew: true);
 
             // Add some test data to the store.
             for (int i = 0; i < 10; i++)
@@ -170,18 +170,18 @@ namespace Hoddmir.Tests.ConsoleApp
 
             IArgon2idParamsProvider argon2Provider;
             ChaCha20Poly1305Provider aead = new();
-            await using  FileAppendOnlyStoreProvider provider = new(RandomTestFilePath);
+            await using  FileAppendOnlyStoreProvider provider = new(RandomTestFilePath, FileMode.CreateNew);
 
             if (useFastArgon)
                 argon2Provider = fastArgon;
             else
                 argon2Provider = new CalibratingArgon2idParamsProvider();
 
-            await using EncryptedEntryStore store = await CreateStoreAsync(provider,
-                                                                           aead,
-                                                                           TestPassword,
-                                                                           argon2Provider,
-                                                                           cancellationToken);
+            await using EncryptedEntryStore store = await CreateOrOpenStoreAsync(provider,
+                                                                                 aead,
+                                                                                 TestPassword,
+                                                                                 argon2Provider,
+                                                                                 cancellationToken, createNew: true);
 
             int numberOfEntries = Random.Shared.Next(150);
 
@@ -229,29 +229,24 @@ namespace Hoddmir.Tests.ConsoleApp
                 throw new InvalidDataException($"Expected {recordCount} valid records. {result}");
         }
 
-        private static Task<EncryptedEntryStore> CreateStoreAsync(IAppendOnlyStoreProvider store, 
-                                                                  IAEADProvider aead,
-                                                                  string password,
-                                                                  IArgon2idParamsProvider argonProvider,
-                                                                  CancellationToken cancellationToken = default)
+        /// <summary>Configures and explicitly creates or opens a test vault.</summary>
+        private static Task<EncryptedEntryStore> CreateOrOpenStoreAsync(IAppendOnlyStoreProvider store,
+                                                                        IAEADProvider aead,
+                                                                        string password,
+                                                                        IArgon2idParamsProvider argonProvider,
+                                                                        CancellationToken cancellationToken,
+                                                                        bool createNew = false)
         {
-            if (store is IAtomicReplace atomicReplace)
-            {
-                byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
-                Task<EncryptedEntryStore> openedEncryptedStore = EncryptedEntryStore
-                                                              .Configure()
-                                                              .WithPassword(passwordBytes)
-                                                              .WithDekArgon2id(argonProvider)
-                                                              .WithAead(aead)
-                                                              .OpenAsync(store,
-                                                                         atomicReplace,
-                                                                         cancellationToken);
-                return openedEncryptedStore;
-            }
-            else
-                throw new ArgumentException("The provided store does not support atomic replace, " +
-                                            "which is required for opening an encrypted store.", 
-                                            nameof(store));
+            if (store is not IAtomicReplace atomicReplace)
+                throw new ArgumentException("The test backend must support atomic replacement.", nameof(store));
+
+            EncryptedEntryStore.StoreBuilder builder = EncryptedEntryStore.Configure()
+                .WithPassword(Encoding.UTF8.GetBytes(password))
+                .WithDekArgon2id(argonProvider)
+                .WithAead(aead);
+            return createNew
+                ? builder.CreateAsync(store, atomicReplace, cancellationToken)
+                : builder.OpenAsync(store, atomicReplace, cancellationToken);
         }
 
         public static string RandomString(int length)
