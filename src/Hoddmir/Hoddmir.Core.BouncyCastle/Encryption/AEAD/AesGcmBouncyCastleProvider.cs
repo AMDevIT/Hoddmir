@@ -10,8 +10,7 @@ namespace Hoddmir.BouncyCastle.Encryption.AEAD;
 
 /// <summary>
 /// AES-256-GCM AEAD provider backed by BouncyCastle.
-/// Used automatically as a fallback for <see cref="AesGcmProvider"/> on runtimes
-/// that do not support .NET's native AesGcm (i.e. &lt; .NET 9).
+/// Can be selected explicitly when the runtime does not support <see cref="AesGcmProvider"/>.
 /// Can also be used directly when explicit BouncyCastle behaviour is desired.
 /// </summary>
 public sealed class AesGcmBouncyCastleProvider : IAEADProvider

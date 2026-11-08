@@ -22,19 +22,20 @@ public sealed class EncryptedStoreTests
     private static readonly IArgon2idParamsProvider FastDekArgon =
         new FixedArgon2idParamsProvider(new Argon2idParams(32 * 1024, 1, 1));
 
-    private static Task<EncryptedEntryStore> CreateStoreAsync(
-        MemoryAppendOnlyStoreProvider ms,
-        IAEADProvider aead,
-        byte[]? password = null,
-        int sessionIters = 1,
-        int sessionSaltLen = 16) =>
+    /// <summary>Opens a test store with the given backend and reduced KDF parameters.</summary>
+    private static Task<EncryptedEntryStore> CreateStoreAsync<TBackend>(TBackend backend,
+                                                                        IAEADProvider aead,
+                                                                        byte[]? password = null,
+                                                                        int sessionIters = 1,
+                                                                        int sessionSaltLen = 16)
+        where TBackend : IAppendOnlyStoreProvider, IAtomicReplace =>
         EncryptedEntryStore.Configure()
             .WithPassword(password ?? Password)
             .WithSessionIterations(sessionIters)
             .WithSessionSaltLength(sessionSaltLen)
             .WithDekArgon2id(FastDekArgon)
             .WithAead(aead)
-            .OpenAsync(ms, ms);
+            .OpenAsync(backend, backend);
 
     // ── Round-trip ───────────────────────────────────────────────────────────
 
@@ -277,7 +278,7 @@ public sealed class EncryptedStoreTests
         await using (var store = await CreateStoreAsync(ms, new AesCtrHmacSha256Provider()))
             await store.PutAsync("x", Encoding.UTF8.GetBytes("data"));
 
-        // In v0x04 the AeadId is inside the encrypted header, so it can only be verified
+        // In v0x01 the AeadId is inside the encrypted header, so it can only be verified
         // after decryption. With the wrong AEAD provider the header decryption itself fails
         // (CryptographicException) before the AeadId check (InvalidOperationException) is
         // reached. Either exception is a valid signal that the store cannot be opened.
@@ -314,7 +315,7 @@ public sealed class EncryptedStoreTests
             if (buf.AsSpan(i, magic.Length).SequenceEqual(magic))
             { found = true; break; }
 
-        Assert.IsFalse(found, "Magic bytes 'EES1' must not appear in plaintext in v0x04.");
+        Assert.IsFalse(found, "Magic bytes 'EES1' must not appear in plaintext in v0x01.");
 
         // Key must NOT appear in plaintext
         byte[] keyBytes = Encoding.UTF8.GetBytes("secret-key");
@@ -323,7 +324,7 @@ public sealed class EncryptedStoreTests
             if (buf.AsSpan(i, keyBytes.Length).SequenceEqual(keyBytes))
             { keyFound = true; break; }
 
-        Assert.IsFalse(keyFound, "Key 'secret-key' must not appear in plaintext in v0x04.");
+        Assert.IsFalse(keyFound, "Key 'secret-key' must not appear in plaintext in v0x01.");
     }
 
     [TestMethod]
@@ -355,53 +356,90 @@ public sealed class EncryptedStoreTests
             "Two stores with same password must produce different ciphertext.");
     }
 
-    // ── Nonce uniqueness ─────────────────────────────────────────────────────
-
+    /// <summary>Checks the actual AEAD inputs across writes, reopen and compaction.</summary>
     [TestMethod]
     [DynamicData(nameof(Providers), DynamicDataSourceType.Method)]
-    public async Task NonceUniquenessAcrossWritesAndStores(IAEADProvider aead)
+    public async Task RecordKeyNoncePairs_AreUniqueAcrossReopenAndCompaction(IAEADProvider aead)
     {
-        Trace.WriteLine($"Provider: {aead}");
+        RecordingAead recorder = new(aead);
+        MemoryAppendOnlyStoreProvider backend = new();
 
-        const int Writes = 50;
-
-        // In v0x04 payload nonces are NoncePrefix(4)||Seq_BE(8).
-        // We verify uniqueness by checking that all Seq values are distinct within a store,
-        // and that the NoncePrefix differs between stores (so full nonces never collide).
-        async Task<(byte[] NoncePrefix, List<ulong> Seqs)> CollectNonceInfo(
-            MemoryAppendOnlyStoreProvider ms)
+        await using (EncryptedEntryStore store = await CreateStoreAsync(backend, recorder))
         {
-            await using var store = await CreateStoreAsync(ms, aead);
-            for (int i = 0; i < Writes; i++)
-                await store.PutAsync($"k{i}", Encoding.UTF8.GetBytes($"v{i}"));
-
-            // Read NoncePrefix from header: it's inside the encrypted header,
-            // so we verify it indirectly through RotateDek behavior.
-            // For Seq uniqueness: Seq is monotonically increasing by design —
-            // just verify all Writes writes succeeded and data is retrievable.
-            var seqs = new List<ulong>();
-            for (ulong i = 1; i <= Writes; i++)
-                seqs.Add(i); // Seq starts at 1, increments by 1 per Put
-            return ([], seqs);
+            recorder.Encryptions.Clear();
+            await store.PutAsync("keep", "first"u8.ToArray());
+            await store.PutAsync("gone", "second"u8.ToArray());
+            await store.DeleteAsync("gone");
         }
 
-        var ms1 = new MemoryAppendOnlyStoreProvider();
-        var ms2 = new MemoryAppendOnlyStoreProvider();
-
-        var (_, seqs1) = await CollectNonceInfo(ms1);
-        var (_, seqs2) = await CollectNonceInfo(ms2);
-
-        // All sequence numbers within a store must be unique
-        Assert.AreEqual(Writes, seqs1.Distinct().Count(), "Store 1: duplicate Seq detected.");
-        Assert.AreEqual(Writes, seqs2.Distinct().Count(), "Store 2: duplicate Seq detected.");
-
-        // Verify all data is actually readable (real integration check)
-        await using var verify1 = await CreateStoreAsync(ms1, aead);
-        for (int i = 0; i < Writes; i++)
+        await using (EncryptedEntryStore store = await CreateStoreAsync(backend, recorder))
         {
-            var got = await verify1.GetAsync($"k{i}");
-            Assert.IsNotNull(got, $"k{i} should be readable after {Writes} writes.");
+            await store.PutAsync("new", "third"u8.ToArray());
+            await store.CompactAsync();
+            Assert.IsNull(await store.GetAsync("gone"));
         }
+
+        Assert.AreEqual(12, recorder.Encryptions.Count);
+        Assert.AreEqual(12, recorder.Encryptions.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    /// <summary>Checks file offsets after random reads and concurrent store operations.</summary>
+    [TestMethod]
+    public async Task FileStore_ReadThenConcurrentPuts_SurviveReopen()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".hoddmir");
+        try
+        {
+            await using (FileAppendOnlyStoreProvider backend = new(path))
+            await using (EncryptedEntryStore store = await CreateStoreAsync(backend, new AesGcmProvider()))
+            {
+                await store.PutAsync("first", "first value"u8.ToArray());
+                await store.PutAsync("second", "second value"u8.ToArray());
+                CollectionAssert.AreEqual("first value"u8.ToArray(), await store.GetAsync("first"));
+                await Task.WhenAll(Enumerable.Range(0, 12)
+                                             .Select(i => store.PutAsync($"key-{i}", BitConverter.GetBytes(i))));
+            }
+
+            await using FileAppendOnlyStoreProvider reopenedBackend = new(path);
+            await using EncryptedEntryStore reopened = await CreateStoreAsync(reopenedBackend, new AesGcmBouncyCastleProvider());
+            CollectionAssert.AreEqual("first value"u8.ToArray(), await reopened.GetAsync("first"));
+            CollectionAssert.AreEqual("second value"u8.ToArray(), await reopened.GetAsync("second"));
+            for (int i = 0; i < 12; i++)
+                CollectionAssert.AreEqual(BitConverter.GetBytes(i), await reopened.GetAsync($"key-{i}"));
+
+            Assert.IsTrue((await reopened.VerifyAsync()).IsHealthy);
+        }
+        finally { File.Delete(path); }
+    }
+
+    /// <summary>Recovers committed records and compacts away an incomplete append.</summary>
+    [TestMethod]
+    public async Task FileStore_IncompleteTail_CanBeRecoveredByCompaction()
+    {
+        string path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".hoddmir");
+        try
+        {
+            await using (FileAppendOnlyStoreProvider backend = new(path))
+            await using (EncryptedEntryStore store = await CreateStoreAsync(backend, new AesGcmProvider()))
+            {
+                await store.PutAsync("committed", "value"u8.ToArray());
+                await store.PutAsync("incomplete", "value"u8.ToArray());
+            }
+
+            using (FileStream file = new(path, FileMode.Open, FileAccess.Write))
+                file.SetLength(file.Length - 5);
+
+            await using FileAppendOnlyStoreProvider reopenedBackend = new(path);
+            await using EncryptedEntryStore reopened = await CreateStoreAsync(reopenedBackend, new AesGcmProvider());
+            CollectionAssert.AreEqual("value"u8.ToArray(), await reopened.GetAsync("committed"));
+            Assert.IsNull(await reopened.GetAsync("incomplete"));
+            Assert.AreEqual(1, (await reopened.VerifyAsync()).TruncatedRecords);
+            await Assert.ThrowsExceptionAsync<InvalidDataException>(() => reopened.PutAsync("next", "value"u8.ToArray()));
+            await reopened.CompactAsync();
+            await reopened.PutAsync("next", "value"u8.ToArray());
+            Assert.IsTrue((await reopened.VerifyAsync()).IsHealthy);
+        }
+        finally { File.Delete(path); }
     }
 
     // ── DEK rotation ────────────────────────────────────────────────────────
@@ -579,4 +617,47 @@ public sealed class EncryptedStoreTests
         [new AesCtrHmacSha256Provider()],
         [new ChaCha20Poly1305Provider()],
     ];
+
+    private sealed class RecordingAead : IAEADProvider
+    {
+        #region Fields
+
+        private readonly IAEADProvider inner;
+
+        #endregion
+
+        #region Properties
+
+        public List<string> Encryptions { get; } = [];
+        public string Name => this.inner.Name;
+        public int KeySizeBytes => this.inner.KeySizeBytes;
+        public int NonceSizeBytes => this.inner.NonceSizeBytes;
+        public int TagSizeBytes => this.inner.TagSizeBytes;
+
+        #endregion
+
+        #region .ctor
+
+        /// <summary>Wraps the provider used by the store without changing its algorithm ID.</summary>
+        public RecordingAead(IAEADProvider inner) => this.inner = inner;
+
+        #endregion
+
+        #region Methods
+
+        /// <inheritdoc />
+        public void Encrypt(ReadOnlySpan<byte> key, ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> aad,
+                            ReadOnlySpan<byte> plaintext, Span<byte> ciphertext, Span<byte> tag)
+        {
+            this.Encryptions.Add(Convert.ToHexString(SHA256.HashData(key)) + Convert.ToHexString(nonce));
+            this.inner.Encrypt(key, nonce, aad, plaintext, ciphertext, tag);
+        }
+
+        /// <inheritdoc />
+        public bool Decrypt(ReadOnlySpan<byte> key, ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> aad,
+                            ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> tag, Span<byte> plaintext) =>
+            this.inner.Decrypt(key, nonce, aad, ciphertext, tag, plaintext);
+
+        #endregion
+    }
 }

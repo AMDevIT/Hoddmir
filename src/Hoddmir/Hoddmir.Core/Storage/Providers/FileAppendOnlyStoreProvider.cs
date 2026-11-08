@@ -23,10 +23,9 @@ public sealed class FileAppendOnlyStoreProvider
 
     public FileAppendOnlyStoreProvider(string path)
     {
-        this.path = path;
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        fs = OpenStream(path, FileMode.OpenOrCreate);
-        fs.Position = fs.Length; // start in append position
+        this.path = Path.GetFullPath(path);
+        Directory.CreateDirectory(Path.GetDirectoryName(this.path)!);
+        this.fs = OpenStream(this.path, FileMode.OpenOrCreate);
     }
 
     #endregion
@@ -57,49 +56,62 @@ public sealed class FileAppendOnlyStoreProvider
         finally { semaphore.Release(); }
     }
 
-    public async Task AppendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default)
+    /// <inheritdoc />
+    public async Task<long> AppendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default)
     {
         await semaphore.WaitAsync(ct).ConfigureAwait(false);
-        try   { await fs.WriteAsync(data, ct).ConfigureAwait(false); }
+        try
+        {
+            long offset = this.fs.Length;
+            this.fs.Position = offset;
+            await this.fs.WriteAsync(data, ct).ConfigureAwait(false);
+            return offset;
+        }
         finally { semaphore.Release(); }
     }
 
     public async Task FlushAsync(bool hard = false, CancellationToken ct = default)
     {
         await semaphore.WaitAsync(ct).ConfigureAwait(false);
-        try   { await fs.FlushAsync(ct).ConfigureAwait(false); }
+        try
+        {
+            if (hard)
+                this.fs.Flush(flushToDisk: true);
+            else
+                await this.fs.FlushAsync(ct).ConfigureAwait(false);
+        }
         finally { semaphore.Release(); }
     }
 
     public async Task ReplaceWithAsync(Func<Stream, Task> buildNew, CancellationToken ct = default)
     {
-        string temp = path + ".tmp";
-
-        await using (FileStream outFs = new (temp, 
-                                             FileMode.Create, 
-                                             FileAccess.ReadWrite,
-                                             FileShare.None, 
-                                             4096,
-                                             FileOptions.Asynchronous | FileOptions.WriteThrough | FileOptions.SequentialScan))
-        {
-            await buildNew(outFs).ConfigureAwait(false);
-            await outFs.FlushAsync(ct).ConfigureAwait(false);
-        }
-
-        await semaphore.WaitAsync(ct).ConfigureAwait(false);
+        string temp = this.path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            await fs.FlushAsync(ct).ConfigureAwait(false);
-            await fs.DisposeAsync().ConfigureAwait(false);
+            await using (FileStream output = new(temp, FileMode.CreateNew, FileAccess.Write,
+                                                 FileShare.None, 4096, FileOptions.Asynchronous))
+            {
+                await buildNew(output).ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested();
+                output.Flush(flushToDisk: true);
+            }
 
-            // Atomic rename on NTFS and POSIX
-            File.Replace(temp, path, path + ".bak", ignoreMetadataErrors: true);
-            TryDelete(path + ".bak");
-
-            fs = OpenStream(path, FileMode.Open);
-            fs.Position = fs.Length;
+            await this.semaphore.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                await this.fs.DisposeAsync().ConfigureAwait(false);
+                try
+                {
+                    File.Replace(temp, this.path, null, ignoreMetadataErrors: true);
+                }
+                finally
+                {
+                    this.fs = OpenStream(this.path, FileMode.Open);
+                }
+            }
+            finally { this.semaphore.Release(); }
         }
-        finally { semaphore.Release(); }
+        finally { TryDelete(temp); }
     }
 
     private static FileStream OpenStream(string path, FileMode mode) =>

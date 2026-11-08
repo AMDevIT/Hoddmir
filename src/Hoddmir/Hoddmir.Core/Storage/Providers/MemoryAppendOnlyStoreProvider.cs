@@ -30,16 +30,19 @@ public sealed class MemoryAppendOnlyStoreProvider : IAppendOnlyStoreProvider, IA
         finally { _sem.Release(); }
     }
 
-    public async Task AppendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default)
+    /// <inheritdoc />
+    public async Task<long> AppendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default)
     {
         await _sem.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            int need = (int)(_len + data.Length);
-            if (_buf.Length < need)
-                Array.Resize(ref _buf, Math.Max(need, _buf.Length == 0 ? 1024 : _buf.Length * 2));
-            data.Span.CopyTo(new Span<byte>(_buf, (int)_len, data.Length));
-            _len += data.Length;
+            long offset = this._len;
+            int need = checked((int)(offset + data.Length));
+            if (this._buf.Length < need)
+                Array.Resize(ref this._buf, Math.Max(need, this._buf.Length == 0 ? 1024 : this._buf.Length * 2));
+            data.Span.CopyTo(this._buf.AsSpan((int)offset, data.Length));
+            this._len = need;
+            return offset;
         }
         finally { _sem.Release(); }
     }

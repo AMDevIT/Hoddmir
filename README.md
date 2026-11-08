@@ -53,7 +53,7 @@ Hoddmir fills the gap: **encrypted, portable, embedded, offline-first**.
 
 ### Record encryption
 
-Each blob is encrypted with a 256-bit **Data Encryption Key (DEK)** using one of three AEAD algorithms:
+Each record is encrypted with a 256-bit key derived from the store's **Data Encryption Key (DEK)** using one of three AEAD algorithms:
 
 | Algorithm | Notes |
 |---|---|
@@ -65,7 +65,7 @@ All three algorithms are verified against published test vectors: RFC 8439 (ChaC
 
 ### DEK protection
 
-The DEK is wrapped in the store header using **Argon2id** (the only supported mode in v0x04).
+The DEK is wrapped in the store header using **Argon2id** (the only supported mode in v0x01).
 
 Two independent Argon2id derivations protect the store:
 
@@ -80,16 +80,11 @@ The DEK KEK parameters are stored inside the encrypted header and can be rotated
 
 ### Nonce safety
 
-Two independent nonce schemes are used:
-
-- **Record prefix nonce:** `Token[0..12]` — 12 bytes of CSPRNG entropy unique per record. No shared component between records.
-- **Payload nonce:** `NoncePrefix(4, fixed per store) ‖ Seq_BE(8)` — uniqueness guaranteed by the monotonic `uint64` sequence counter for up to 2⁶⁴ writes per store.
-
-Both schemes eliminate nonce reuse by construction.
+Each write or rewrite generates a fresh 32-byte random salt. HKDF-SHA-256 derives the record key from the DEK, the salt and the UTF-8 context `Hoddmir/0x01/record`. Under that key, the prefix uses the 12-byte zero nonce and the payload uses the 12-byte nonce ending in `01` with all other bytes zero. Reopening a store requires no nonce counter.
 
 ### Memory safety
 
-Sensitive material (DEK, nonce prefix, derived subkeys) is held in GC-pinned managed arrays (`SensitiveBytes`) and zeroed with `CryptographicOperations.ZeroMemory` on disposal. Passwords are never stored — only the DEK, wrapped with the password-derived key, is persisted.
+The DEK is held in a GC-pinned managed array (`SensitiveBytes`) and cleared on disposal. Temporary record keys and plaintext buffers are cleared after use. The store persists the wrapped DEK.
 
 ---
 
@@ -213,29 +208,26 @@ await using var store = await EncryptedEntryStore.Configure()
 
 ### Key rotation
 
-Rotate the DEK at any time without closing the store. All live blobs are re-encrypted with a fresh key and a new nonce prefix atomically. The current password must be provided to authenticate the rotation.
+Rotate the DEK at any time without closing the store. All live blobs are re-encrypted under a fresh DEK and the resulting file replaces the previous one atomically. Rotation requires the current password.
 
 ```csharp
 // Rotate DEK, keeping the same password
-await store.RotateDekAsync(
-    currentPasswordUtf8: Encoding.UTF8.GetBytes("my-strong-password"));
+await store.RotateDekAsync(currentPasswordUtf8: Encoding.UTF8.GetBytes("my-strong-password"));
 
 // Rotate DEK and change the password at the same time
-await store.RotateDekAsync(
-    currentPasswordUtf8: Encoding.UTF8.GetBytes("old-password"),
-    newPasswordUtf8:     Encoding.UTF8.GetBytes("new-stronger-password"));
+await store.RotateDekAsync(currentPasswordUtf8: Encoding.UTF8.GetBytes("old-password"),
+                           newPasswordUtf8:     Encoding.UTF8.GetBytes("new-stronger-password"));
 
 // Rotate DEK and change session parameters (all three credentials change)
-await store.RotateDekAsync(
-    currentPasswordUtf8: Encoding.UTF8.GetBytes("old-password"),
-    newPasswordUtf8:     Encoding.UTF8.GetBytes("new-password"),
-    newSessionIters:     4,
-    newSessionSaltLen:   64);
+await store.RotateDekAsync(currentPasswordUtf8: Encoding.UTF8.GetBytes("old-password"),
+                           newPasswordUtf8:     Encoding.UTF8.GetBytes("new-password"),
+                           newSessionIters:     4,
+                           newSessionSaltLen:   64);
 ```
 
 ### Compaction
 
-The store is append-only. Deleted blobs and overwritten values leave tombstones on disk. Call `CompactAsync` periodically to reclaim space:
+The store is append-only. A delete appends a tombstone, and an overwrite appends the new value. Call `CompactAsync` to reclaim the space occupied by old records.
 
 ```csharp
 await store.CompactAsync();
@@ -270,7 +262,7 @@ byte[]? recovered = provider.TryDecrypt(key, nonce, aad, combined);
 | .NET 9+ (all platforms) | ✅ via BouncyCastle | ✅ Native | ✅ |
 | iOS / Android (.NET 9+) | ✅ via BouncyCastle | ✅ via BouncyCastle¹ | ✅ |
 
-¹ Requires the `Hoddmir.BouncyCastle` package. `AesGcmProvider` throws `PlatformNotSupportedException` at construction if no fallback is registered and the runtime is older than .NET 9.
+¹ Select `AesGcmBouncyCastleProvider` explicitly from the `Hoddmir.BouncyCastle` package.
 
 ---
 
@@ -288,7 +280,7 @@ This is the expected threat model summary:
 | Forensic file analysis without memory | ✅ Very high | Fully opaque format — no magic bytes, no plaintext structure, statistically indistinguishable from random noise |
 | Memory forensics, store open | 🟡 Medium | DEK lives in the process during an open session — structural limitation of managed runtimes |
 | Swap / pagefile during active session | 🟡 Medium | OS may page process memory to disk; not controllable from managed code without kernel privileges |
-| Key name confidentiality | ✅ High | Blob keys are stored only in the encrypted index record; not visible in plaintext on disk |
+| Key name confidentiality | ✅ High | Blob keys are stored inside the encrypted payload of each record |
 | Nation-state, device off or store closed | ✅ Very high | No memory to dump — same posture as VeraCrypt with a dismounted volume |
 | Nation-state, store open on a live device | 🔴 Low | DEK is in memory; memory forensics, cold boot, or hypervisor introspection become viable |
 
@@ -300,7 +292,7 @@ This is the expected threat model summary:
 
 **Memory forensics is the main exposure.** The DEK is resident in process memory for the duration of an open store session. A memory dump of the process (`ProcDump`, `WinPmem`, OS crash dump) can expose the DEK even with `SensitiveBytes` and `ZeroMemory` in place. This is a structural limitation of .NET managed runtimes — the JIT and GC can materialise intermediate values in registers or on the stack before zeroing occurs. VeraCrypt mitigates this using kernel drivers and non-pageable memory; Hoddmir cannot do this without elevated privileges.
 
-**Key names are encrypted.** As of v0x04, record IDs are stored only in the encrypted index record — they do not appear in plaintext on disk. An investigator without the password cannot observe key names, values, or the number of records. The write timeline (number of records written over time) can still be inferred from file size growth if the attacker has access to successive snapshots of the file.
+**Key names are encrypted.** The key and value are stored together in the authenticated ciphertext. File size and its growth across snapshots remain visible.
 
 **The real attack surface at nation-state level is never the ciphertext.** Keyloggers, compromised devices, supply chain attacks, and coercive access to the password are the practical vectors. No cryptographic library protects against these — Hoddmir included.
 
@@ -310,7 +302,7 @@ This is the expected threat model summary:
 
 ## File format
 
-The current version is `0x04`. The file is **fully opaque** — there are no plaintext magic bytes, no visible structure, and no identifiable headers. The file is statistically indistinguishable from random noise.
+The current version is `0x01`. The file is **fully opaque** — there are no plaintext magic bytes, no visible structure, and no identifiable headers. The file is statistically indistinguishable from random noise.
 
 ### On-disk layout
 
@@ -320,13 +312,12 @@ The current version is `0x04`. The file is **fully opaque** — there are no pla
 [Record...]
 ```
 
-The salt length is a caller-controlled credential (default 16 bytes, max 256). Everything after the salt is encrypted with the session KEK.
+The session KEK encrypts the 512-byte header following the session salt. The records use keys derived from the DEK.
 
 ### Header plaintext (decrypted, padded to 496 bytes with random data)
 
 ```
-Magic(4)="EES1" | Ver(1)=0x04 | AeadId(1)
-NoncePrefix(4)  | IndexToken(16)
+Magic(4)="EES1" | Ver(1)=0x01 | AeadId(1)
 DekNonce(12)    | EncDek(32)   | DekTag(16)
 DekArgonSalt(16)| DekArgonMemKiB(4) | DekArgonIters(4) | DekArgonPar(4)
 ```
@@ -334,27 +325,27 @@ DekArgonSalt(16)| DekArgonMemKiB(4) | DekArgonIters(4) | DekArgonPar(4)
 ### Record layout (all fields opaque from outside)
 
 ```
-[EncPrefix(45)]    — encrypted 29-byte prefix + 16-byte tag
-[Token(16)]        — random opaque handle
-[PaddedCt(var)]    — encrypted payload + random padding
-[PayloadTag(16)]   — AEAD tag over EncPrefix + PaddedCt
+[RecordSalt(32)]
+[EncPrefix(29)]    — encrypted 13-byte prefix + 16-byte tag
+[PaddedCt(var)]    — encrypted payload including padding
+[PayloadTag(16)]
 ```
 
-EncPrefix plaintext (29 bytes):
+Prefix plaintext (13 bytes):
 ```
-PreNoise(4) | Op(1) | Seq(8,LE) | KeyLen(4,LE) | CtLen(4,LE) | PaddedCtLen(4,LE) | PostNoise(4)
+Op(1) | KeyLen(4,LE) | ContentLen(4,LE) | PaddedLen(4,LE)
 ```
 
 Payload plaintext:
 ```
-keyBytes(KeyLen) || value(CtLen-KeyLen) || random_padding(PaddedCtLen-CtLen)
+keyBytes(KeyLen) || value(ContentLen-KeyLen) || random_padding(PaddedLen-ContentLen)
 ```
 
-The `AeadId` and all key material are inside the encrypted header. Attempting to open a store with the wrong AEAD provider or wrong credentials fails immediately.
+Operation `0` is a put and `1` is a tombstone with an empty value. The prefix authenticates the absolute record offset as an 8-byte little-endian integer. The payload authenticates the encrypted prefix and its tag as associated data.
 
-### Encrypted index
+### Index and recovery
 
-Every write appends a data record followed by an **encrypted index record**. The index maps opaque token hex strings to human-readable IDs. Record IDs never appear in plaintext on disk. `ListIds()` returns IDs from the in-memory map populated at open time.
+Each mutation appends one record. Opening the store authenticates records in file order and rebuilds the in-memory index. A complete record that fails authentication prevents opening. If the final record is incomplete, the store exposes the preceding records and reports the tail via `VerifyAsync`. Call `CompactAsync` to remove the incomplete tail before appending again. Compaction and rotation stop before replacing the file if any active record is unreadable.
 
 ### Credentials
 
@@ -381,11 +372,13 @@ public class MyCustomStoreProvider : IAppendOnlyStoreProvider, IAtomicReplace
 {
     public Task<long> GetLengthAsync(CancellationToken ct = default) { ... }
     public Task<int>  ReadAtAsync(long offset, Memory<byte> buffer, CancellationToken ct = default) { ... }
-    public Task       AppendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default) { ... }
+    public Task<long> AppendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default) { ... }
     public Task       FlushAsync(bool hard = false, CancellationToken ct = default) { ... }
     public Task       ReplaceWithAsync(Func<Stream, Task> buildNew, CancellationToken ct = default) { ... }
 }
 ```
+
+`AppendAsync` writes at the end of the store and returns the actual starting offset of that write. Use one open `EncryptedEntryStore` instance per backing store.
 ---
 
 ## Contributing
