@@ -132,3 +132,11 @@
 - Affected files. Core storage, the integration tests, README.md, and the [follow-up note](vault-audit-follow-up.md).
 - Checks. Restore, build, the full test suite, and isolated probes succeeded on .NET 9 and .NET 10.
 - Next step. Integrate the corrected branch into the GitHub default branch.
+
+## Consolidated security audit PDF
+
+- Objective and status. Delivered the audit timeline, test results, and vulnerability classification in a verified PDF.
+- Decisions. Identify revisions and distinguish source findings from runtime evidence.
+- Affected files. The PDF output and the [report note](consolidated-security-audit-pdf.md).
+- Checks. Cross-checked retained evidence, verified GitHub references on 10 November 2026, and rendered and inspected all PDF pages.
+- Open issues. GitHub main still points to the historical revision.
