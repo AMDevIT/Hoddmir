@@ -9,16 +9,10 @@ namespace Hoddmir.Core.Encryption.AEAD;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <strong>Security precondition — IKM entropy:</strong>
-/// The subkey derivation step uses HKDF-SHA-256 (RFC 5869). When no explicit
-/// <c>hkdfSalt</c> is supplied the salt defaults to all-zeros, which is safe
-/// <em>only if the IKM (the key passed to <see cref="Encrypt"/> /
-/// <see cref="Decrypt"/>) is already a uniformly random key of at least 128 bits</em>
-/// — for example, the randomly-generated DEK used by <c>EncryptedEntryStore</c>.
-/// If your IKM is a password, a PIN, or any other low-entropy material you
-/// <strong>must</strong> pass an explicit random <c>hkdfSalt</c> (≥ 32 bytes),
-/// or — better — pre-process the IKM through Argon2id / PBKDF2 before passing it here.
-/// Violating this precondition silently weakens subkey separation without error.
+/// <strong>Key requirements:</strong> Supply a 32-byte cryptographic key.
+/// Derive password-based keys with a password KDF such as Argon2id before passing
+/// them to this provider. An optional public HKDF salt leaves the cost of guessing
+/// a weak key essentially unchanged.
 /// </para>
 /// <para>
 /// <strong>Nonce construction:</strong>
@@ -27,7 +21,7 @@ namespace Hoddmir.Core.Encryption.AEAD;
 /// </para>
 /// <para>
 /// <strong>MAC:</strong>
-/// Trunc-16(HMAC-SHA-256(Kmac, AAD ‖ nonce ‖ ciphertext)).
+/// Trunc-16(HMAC-SHA-256(Kmac, LE64(AAD length) ‖ LE64(ciphertext length) ‖ AAD ‖ nonce ‖ ciphertext)).
 /// The tag is verified <em>before</em> decryption (Encrypt-then-MAC).
 /// </para>
 /// </remarks>
@@ -77,7 +71,7 @@ public sealed class AesCtrHmacSha256Provider
                                         $"Received {hkdfSalt.Length} bytes.", 
                                         nameof(hkdfSalt));
 
-        this.hkdfSalt = hkdfSalt ?? new byte[32]; // zero salt = RFC 5869 default for uniform IKM
+        this.hkdfSalt = hkdfSalt?.ToArray() ?? new byte[32];
         this.logger   = logger;
     }
 
@@ -102,13 +96,17 @@ public sealed class AesCtrHmacSha256Provider
 
         Span<byte> kenc = stackalloc byte[32];
         Span<byte> kmac = stackalloc byte[32];
-        DeriveSubkeys(key, kenc, kmac);
-
-        AesCtrXor(kenc, nonce, plaintext, ciphertext);
-        ComputeMac(kmac, aad, nonce, ciphertext, tag);
-
-        CryptographicOperations.ZeroMemory(kenc);
-        CryptographicOperations.ZeroMemory(kmac);
+        try
+        {
+            this.DeriveSubkeys(key, kenc, kmac);
+            AesCtrXor(kenc, nonce, plaintext, ciphertext);
+            ComputeMac(kmac, aad, nonce, ciphertext, tag);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(kenc);
+            CryptographicOperations.ZeroMemory(kmac);
+        }
     }
 
     public bool Decrypt(ReadOnlySpan<byte> key,
@@ -128,102 +126,83 @@ public sealed class AesCtrHmacSha256Provider
 
         Span<byte> kenc = stackalloc byte[32];
         Span<byte> kmac = stackalloc byte[32];
-        DeriveSubkeys(key, kenc, kmac);
-
-        // Verify MAC before decrypting (Encrypt-then-MAC)
         Span<byte> expectedTag = stackalloc byte[TagSize];
-        ComputeMac(kmac, aad, nonce, ciphertext, expectedTag);
+        try
+        {
+            this.DeriveSubkeys(key, kenc, kmac);
+            ComputeMac(kmac, aad, nonce, ciphertext, expectedTag);
+            if (!CryptographicOperations.FixedTimeEquals(expectedTag, tag))
+            {
+                this.logger?.LogDebug("AES-CTR+HMAC decryption failed: MAC mismatch.");
+                return false;
+            }
 
-        bool valid = CryptographicOperations.FixedTimeEquals(expectedTag, tag);
-
-        if (!valid)
+            AesCtrXor(kenc, nonce, ciphertext, plaintext);
+            return true;
+        }
+        finally
         {
             CryptographicOperations.ZeroMemory(kenc);
             CryptographicOperations.ZeroMemory(kmac);
-            logger?.LogDebug("AES-CTR+HMAC decryption failed: MAC mismatch.");
-            return false;
+            CryptographicOperations.ZeroMemory(expectedTag);
         }
-
-        AesCtrXor(kenc, nonce, ciphertext, plaintext);
-        CryptographicOperations.ZeroMemory(kenc);
-        CryptographicOperations.ZeroMemory(kmac);
-        return true;
     }
 
     // HKDF-SHA-256 (RFC 5869): Extract(salt, ikm) → PRK → Expand(PRK, info, 64) → Kenc ‖ Kmac.
-    //
-    // Salt behaviour:
-    //   • Caller-supplied salt (≥ 32 bytes): full RFC 5869 security regardless of IKM entropy.
-    //   • All-zeros salt (default):           safe only when IKM is a uniform random key
-    //                                         (e.g. the EncryptedEntryStore DEK).
-    //     In both cases the two 32-byte subkeys are domain-separated by the "AES-CTR-HKDF"
-    //     info label, so Kenc and Kmac are independent even if the IKM is reused elsewhere.
     private void DeriveSubkeys(ReadOnlySpan<byte> ikm, Span<byte> kenc, Span<byte> kmac)
     {
-        Span<byte> prk = stackalloc byte[32];
-        HKDF.Extract(HashAlgorithmName.SHA256, ikm, hkdfSalt, prk);
-
         Span<byte> okm = stackalloc byte[64];
-        HKDF.Expand(HashAlgorithmName.SHA256, prk, okm, "AES-CTR-HKDF"u8);
-
-        okm[..32].CopyTo(kenc);
-        okm[32..].CopyTo(kmac);
-
-        CryptographicOperations.ZeroMemory(prk);
-        CryptographicOperations.ZeroMemory(okm);
+        try
+        {
+            HKDF.DeriveKey(HashAlgorithmName.SHA256, ikm, okm, this.hkdfSalt, "AES-CTR-HKDF"u8);
+            okm[..32].CopyTo(kenc);
+            okm[32..].CopyTo(kmac);
+        }
+        finally { CryptographicOperations.ZeroMemory(okm); }
     }
 
-    // Emits a warning when all of the following are true:
-    //   • No explicit salt was provided (salt is all-zeros).
-    //   • The IKM looks suspiciously low-entropy (> 50 % of bytes identical).
-    //   • A logger is attached.
-    // This is a best-effort heuristic, not a security guarantee — it catches the
-    // most obvious misuse (e.g. passing a short ASCII password as the raw IKM)
-    // without producing false positives on legitimate uniform keys.
+    /// <summary>Warns when a key has a conspicuously repetitive byte pattern.</summary>
     private void WarnIfLowEntropyIkm(ReadOnlySpan<byte> ikm)
     {
-        if (logger is null) return;
-        if (!IsSaltAllZeros()) return; // caller supplied a real salt — no concern
+        if (this.logger is null)
+            return;
 
-        // Count the most-frequent byte value.
-        Span<int> freq = stackalloc int[256];
-        foreach (byte b in ikm) freq[b]++;
-        int maxFreq = 0;
-        foreach (int f in freq) if (f > maxFreq) maxFreq = f;
+        Span<int> frequency = stackalloc int[256];
+        frequency.Clear();
+        foreach (byte value in ikm)
+            frequency[value]++;
 
-        if (maxFreq > ikm.Length * LowEntropyThreshold)
-            logger.LogWarning(
-                "[{Provider}] The IKM appears to have low entropy " +
-                "({MaxFreq}/{Total} bytes share the same value) and no explicit HKDF salt " +
-                "was provided. If the IKM is a password or other low-entropy material, " +
-                "pass a random hkdfSalt to the constructor or pre-process the IKM with " +
-                "Argon2id / PBKDF2 before using this provider.",
-                Name, maxFreq, ikm.Length);
+        foreach (int count in frequency)
+        {
+            if (count <= ikm.Length * LowEntropyThreshold)
+                continue;
+
+            this.logger.LogWarning("[{Provider}] The key appears to have low entropy. " +
+                                   "Derive password-based keys with a password KDF before encryption.", this.Name);
+            break;
+        }
+        frequency.Clear();
     }
-
-    private bool IsSaltAllZeros()
-    {
-        foreach (byte b in hkdfSalt)
-            if (b != 0) return false;
-        return true;
-    }
-
-    // Computes Trunc-16(HMAC-SHA-256(kmac, aad ‖ nonce ‖ ciphertext)) into `tag`.
+    /// <summary>Authenticates the lengths and bytes of the variable-length fields and the fixed-length nonce.</summary>
     private static void ComputeMac(ReadOnlySpan<byte> kmac,
                                    ReadOnlySpan<byte> aad,
                                    ReadOnlySpan<byte> nonce,
                                    ReadOnlySpan<byte> ciphertext,
                                    Span<byte> tag)
     {
-        byte[] kmacArray = kmac.ToArray();
-        using var hmac = new HMACSHA256(kmacArray);
-        CryptographicOperations.ZeroMemory(kmacArray);
+        Span<byte> lengths = stackalloc byte[2 * sizeof(ulong)];
+        Span<byte> hash = stackalloc byte[32];
+        BinaryPrimitives.WriteUInt64LittleEndian(lengths, (ulong)aad.Length);
+        BinaryPrimitives.WriteUInt64LittleEndian(lengths[sizeof(ulong)..], (ulong)ciphertext.Length);
 
-        hmac.TransformBlock(aad.ToArray(),            0, aad.Length,        null, 0);
-        hmac.TransformBlock(nonce.ToArray(),           0, nonce.Length,      null, 0);
-        hmac.TransformFinalBlock(ciphertext.ToArray(), 0, ciphertext.Length);
-
-        hmac.Hash!.AsSpan(0, TagSize).CopyTo(tag);
+        using IncrementalHash hmac = IncrementalHash.CreateHMAC(HashAlgorithmName.SHA256, kmac);
+        hmac.AppendData(lengths);
+        hmac.AppendData(aad);
+        hmac.AppendData(nonce);
+        hmac.AppendData(ciphertext);
+        hmac.GetHashAndReset(hash);
+        hash[..TagSize].CopyTo(tag);
+        CryptographicOperations.ZeroMemory(hash);
     }
 
     // AES-256-CTR: keystream = ECB-encrypt(nonce[0..11] ‖ counter_BE[4]), XOR with input.
@@ -240,12 +219,14 @@ public sealed class AesCtrHmacSha256Provider
 #pragma warning restore CA5358
 
         aes.Padding = PaddingMode.None;
-        aes.Key     = kenc.ToArray();
+        byte[] key = kenc.ToArray();
+        try { aes.Key = key; }
+        finally { CryptographicOperations.ZeroMemory(key); }
 
         using ICryptoTransform enc = aes.CreateEncryptor();
 
-        Span<byte> counterBlock = stackalloc byte[16];
-        nonce.CopyTo(counterBlock[..12]);
+        byte[] counterBlock = new byte[16];
+        nonce.CopyTo(counterBlock);
 
         byte[] keystreamBuf = new byte[16];
         uint   counter      = 1;
@@ -253,8 +234,8 @@ public sealed class AesCtrHmacSha256Provider
 
         while (offset < input.Length)
         {
-            BinaryPrimitives.WriteUInt32BigEndian(counterBlock[12..], counter);
-            enc.TransformBlock(counterBlock.ToArray(), 0, 16, keystreamBuf, 0);
+            BinaryPrimitives.WriteUInt32BigEndian(counterBlock.AsSpan(12), counter);
+            enc.TransformBlock(counterBlock, 0, 16, keystreamBuf, 0);
 
             int n = Math.Min(16, input.Length - offset);
             for (int i = 0; i < n; i++)

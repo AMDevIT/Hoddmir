@@ -12,6 +12,7 @@ public sealed class FileAppendOnlyStoreProvider
     #region Fields
 
     private readonly string path;
+    private readonly FileStream writerLock;
     // Not readonly: swapped after ReplaceWithAsync.
     private FileStream fs;
     // SemaphoreSlim(1,1) gives async-safe mutual exclusion.
@@ -21,12 +22,26 @@ public sealed class FileAppendOnlyStoreProvider
 
     #region .ctor
 
-    public FileAppendOnlyStoreProvider(string path)
+    /// <summary>Opens an existing vault file or creates an empty file with <see cref="FileMode.CreateNew"/>.</summary>
+    public FileAppendOnlyStoreProvider(string path, FileMode mode = FileMode.Open)
     {
-        this.path = path;
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        fs = OpenStream(path, FileMode.OpenOrCreate);
-        fs.Position = fs.Length; // start in append position
+        if (mode is not (FileMode.Open or FileMode.CreateNew))
+            throw new ArgumentOutOfRangeException(nameof(mode));
+
+        this.path = Path.GetFullPath(path);
+        if (mode == FileMode.CreateNew)
+            Directory.CreateDirectory(Path.GetDirectoryName(this.path)!);
+        // The lock file must keep the same identity across vault replacements and reopenings.
+        this.writerLock = new(this.path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        try
+        {
+            this.fs = OpenStream(this.path, mode);
+        }
+        catch
+        {
+            this.writerLock.Dispose();
+            throw;
+        }
     }
 
     #endregion
@@ -57,53 +72,76 @@ public sealed class FileAppendOnlyStoreProvider
         finally { semaphore.Release(); }
     }
 
-    public async Task AppendAsync(ReadOnlyMemory<byte> data, CancellationToken ct = default)
+    /// <inheritdoc />
+    public async Task AppendAsync(ReadOnlyMemory<byte> data, long expectedOffset, CancellationToken ct = default)
     {
         await semaphore.WaitAsync(ct).ConfigureAwait(false);
-        try   { await fs.WriteAsync(data, ct).ConfigureAwait(false); }
+        try
+        {
+            long offset = this.fs.Length;
+            if (offset != expectedOffset)
+                throw new IOException("The backend length changed before append.");
+            this.fs.Position = offset;
+            await this.fs.WriteAsync(data, ct).ConfigureAwait(false);
+        }
         finally { semaphore.Release(); }
     }
 
     public async Task FlushAsync(bool hard = false, CancellationToken ct = default)
     {
         await semaphore.WaitAsync(ct).ConfigureAwait(false);
-        try   { await fs.FlushAsync(ct).ConfigureAwait(false); }
+        try
+        {
+            if (hard)
+                this.fs.Flush(flushToDisk: true);
+            else
+                await this.fs.FlushAsync(ct).ConfigureAwait(false);
+        }
         finally { semaphore.Release(); }
     }
 
     public async Task ReplaceWithAsync(Func<Stream, Task> buildNew, CancellationToken ct = default)
     {
-        string temp = path + ".tmp";
-
-        await using (FileStream outFs = new (temp, 
-                                             FileMode.Create, 
-                                             FileAccess.ReadWrite,
-                                             FileShare.None, 
-                                             4096,
-                                             FileOptions.Asynchronous | FileOptions.WriteThrough | FileOptions.SequentialScan))
-        {
-            await buildNew(outFs).ConfigureAwait(false);
-            await outFs.FlushAsync(ct).ConfigureAwait(false);
-        }
-
-        await semaphore.WaitAsync(ct).ConfigureAwait(false);
+        string temp = this.path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            await fs.FlushAsync(ct).ConfigureAwait(false);
-            await fs.DisposeAsync().ConfigureAwait(false);
+            FileStreamOptions options = new()
+            {
+                Mode = FileMode.CreateNew,
+                Access = FileAccess.Write,
+                Share = FileShare.None,
+                Options = FileOptions.Asynchronous
+            };
+            if (!OperatingSystem.IsWindows())
+                options.UnixCreateMode = File.GetUnixFileMode(this.path);
 
-            // Atomic rename on NTFS and POSIX
-            File.Replace(temp, path, path + ".bak", ignoreMetadataErrors: true);
-            TryDelete(path + ".bak");
+            await using (FileStream output = new(temp, options))
+            {
+                await buildNew(output).ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested();
+                output.Flush(flushToDisk: true);
+            }
 
-            fs = OpenStream(path, FileMode.Open);
-            fs.Position = fs.Length;
+            await this.semaphore.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                await this.fs.DisposeAsync().ConfigureAwait(false);
+                try
+                {
+                    File.Replace(temp, this.path, null, ignoreMetadataErrors: false);
+                }
+                finally
+                {
+                    this.fs = OpenStream(this.path, FileMode.Open);
+                }
+            }
+            finally { this.semaphore.Release(); }
         }
-        finally { semaphore.Release(); }
+        finally { TryDelete(temp); }
     }
 
     private static FileStream OpenStream(string path, FileMode mode) =>
-        new(path, mode, FileAccess.ReadWrite, FileShare.None, 4096,
+        new(path, mode, FileAccess.ReadWrite, FileShare.None, 1,
             FileOptions.Asynchronous | FileOptions.WriteThrough | FileOptions.RandomAccess);
 
     private static void TryDelete(string p) 
@@ -128,8 +166,12 @@ public sealed class FileAppendOnlyStoreProvider
         }
         finally 
         { 
-            semaphore.Release(); 
-            semaphore.Dispose(); 
+            try { await this.writerLock.DisposeAsync().ConfigureAwait(false); }
+            finally
+            {
+                semaphore.Release();
+                semaphore.Dispose();
+            }
         }
     }
 

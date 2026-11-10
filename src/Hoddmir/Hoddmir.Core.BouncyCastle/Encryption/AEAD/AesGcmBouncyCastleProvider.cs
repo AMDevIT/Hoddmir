@@ -10,8 +10,7 @@ namespace Hoddmir.BouncyCastle.Encryption.AEAD;
 
 /// <summary>
 /// AES-256-GCM AEAD provider backed by BouncyCastle.
-/// Used automatically as a fallback for <see cref="AesGcmProvider"/> on runtimes
-/// that do not support .NET's native AesGcm (i.e. &lt; .NET 9).
+/// Can be selected explicitly when the runtime does not support <see cref="AesGcmProvider"/>.
 /// Can also be used directly when explicit BouncyCastle behaviour is desired.
 /// </summary>
 public sealed class AesGcmBouncyCastleProvider : IAEADProvider
@@ -39,13 +38,13 @@ public sealed class AesGcmBouncyCastleProvider : IAEADProvider
             throw new ArgumentException("Ciphertext span must equal plaintext length.");
 
         var gcm = new GcmBlockCipher(new AesEngine());
-        var parameters = new AeadParameters(new KeyParameter(key.ToArray()), TagSize * 8, nonce.ToArray(),
+        var parameters = new AeadParameters(new KeyParameter(key), TagSize * 8, nonce.ToArray(),
                                             aad.IsEmpty ? null : aad.ToArray());
         gcm.Init(true, parameters);
 
         var outBuf = new byte[gcm.GetOutputSize(plaintext.Length)];
-        int outLen = gcm.ProcessBytes(plaintext.ToArray(), 0, plaintext.Length, outBuf, 0);
-        outLen += gcm.DoFinal(outBuf, outLen);
+        int outLen = gcm.ProcessBytes(plaintext, outBuf);
+        gcm.DoFinal(outBuf.AsSpan(outLen));
 
         // BouncyCastle appends tag after ciphertext
         outBuf.AsSpan(0, plaintext.Length).CopyTo(ciphertext);
@@ -62,7 +61,7 @@ public sealed class AesGcmBouncyCastleProvider : IAEADProvider
             return false;
 
         var gcm = new GcmBlockCipher(new AesEngine());
-        var parameters = new AeadParameters(new KeyParameter(key.ToArray()), TagSize * 8, nonce.ToArray(),
+        var parameters = new AeadParameters(new KeyParameter(key), TagSize * 8, nonce.ToArray(),
                                             aad.IsEmpty ? null : aad.ToArray());
         gcm.Init(false, parameters);
 

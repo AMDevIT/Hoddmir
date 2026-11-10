@@ -58,14 +58,14 @@ public sealed class ChaCha20Poly1305Provider(ILogger? logger = null)
         }
 
         var aead = new ChaCha20Poly1305();
-        aead.Init(true, new ParametersWithIV(new KeyParameter(key.ToArray()), nonce.ToArray()));
+        aead.Init(true, new ParametersWithIV(new KeyParameter(key), nonce.ToArray()));
 
         if (!aad.IsEmpty)
             aead.ProcessAadBytes(aad.ToArray(), 0, aad.Length);
 
         var outBuf = new byte[plaintext.Length + TagSize];
-        int outLen = aead.ProcessBytes(plaintext.ToArray(), 0, plaintext.Length, outBuf, 0);
-        outLen += aead.DoFinal(outBuf, outLen);
+        int outLen = aead.ProcessBytes(plaintext, outBuf);
+        aead.DoFinal(outBuf.AsSpan(outLen));
 
         outBuf.AsSpan(0, plaintext.Length).CopyTo(ciphertext);
         outBuf.AsSpan(plaintext.Length, TagSize).CopyTo(tag);
@@ -95,7 +95,7 @@ public sealed class ChaCha20Poly1305Provider(ILogger? logger = null)
         }
 
         ChaCha20Poly1305 aead = new ();
-        aead.Init(false, new ParametersWithIV(new KeyParameter(key.ToArray()), nonce.ToArray()));
+        aead.Init(false, new ParametersWithIV(new KeyParameter(key), nonce.ToArray()));
 
         if (!aad.IsEmpty)
             aead.ProcessAadBytes(aad.ToArray(), 0, aad.Length);

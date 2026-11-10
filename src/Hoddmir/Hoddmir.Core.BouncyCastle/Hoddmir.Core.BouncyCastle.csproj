@@ -5,11 +5,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>Hoddmir.BouncyCastle</RootNamespace>
-	  <Title>Hoddmir Core BouncyCastle addon</Title>
+    <PackageId>Hoddmir.BouncyCastle</PackageId>
+    <Title>Hoddmir Bouncy Castle add-on</Title>
 	  <Authors>Alessandro Morvillo</Authors>
 	  <Company>AMDev.IT di Alessandro Morvillo</Company>
 	  <Product>Hoddmir</Product>
-	  <Description>Hoddmir is a library that implements cryptographic helpers using managed .NET APIs and well-known cryptographic libraries to provide classes with useful tools for third-party applications, such as easy-to-use secure storage or in-memory password vaults. This package allow the use of different cryptographic primitives using BouncyCastle library in operating system and net versions that doesn't implement them.</Description>
+    <Description>ChaCha20-Poly1305 and AES-GCM providers for Hoddmir, backed by Bouncy Castle.</Description>
 	  <Copyright>2025 AMDev.IT di Alessandro Morvillo</Copyright>
 	  <PackageTags>vault;cryptographic;password;tools</PackageTags>
 	  <AssemblyVersion>0.9.0.0</AssemblyVersion>
@@ -32,8 +33,14 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
-    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.10" />
+    <None Include="..\..\..\README.md" Pack="true" PackagePath="/" />
+    <None Include="..\..\..\LICENSE" Pack="true" PackagePath="/" />
+    <None Include="..\..\..\assets\icon\hoddmir_128.png" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.14" />
   </ItemGroup>
 
   <ItemGroup>

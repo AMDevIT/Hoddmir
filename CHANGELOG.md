@@ -6,6 +6,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- `VerifyAsync` reports corrupt records, incomplete writes and changes to the authenticated header.
+- `WithResourceLimits` configures the active ID count, aggregate UTF-8 ID bytes and record content size per store session.
+- Added explicit creation and opening modes and support for trusted log checkpoints across reopen.
+- `Hoddmir.BouncyCastle` includes its README, license and icon. It provides explicit selection of ChaCha20-Poly1305 and AES-GCM. The Bouncy Castle and .NET AES-GCM providers share the same store algorithm ID.
+
+### Changed
+
+- The development format stays at `0x01`. Each mutation authenticates the previous record's digest, and the header and DEK wrapper authenticate distinct context labels.
+- Argon2id protects the header and wraps the data key. PBKDF2, DPAPI and automatic provider registration are no longer part of the current API.
+- `OpenAsync` requires an existing initialized vault. Use `CreateAsync` for new vaults and `FileMode.CreateNew` for new file backends.
+- `IAppendOnlyStoreProvider.AppendAsync` checks the expected offset before writing under the same synchronization as the append. Custom providers must implement the updated signature.
+- Stores created by earlier development builds must be recreated.
+
+### Fixed
+
+- File writes seek to the end under the same lock that determines the returned offset. Store operations are coordinated with compaction and key rotation.
+- Each record derives its own key with HKDF-SHA-256 from a fresh random salt. The prefix and payload use distinct nonces.
+- AES-CTR + HMAC authenticates the lengths of the AAD and ciphertext. Data authenticated by the previous implementation must be recreated.
+- Reject replayed records that break the authenticated chain. Verification detects changes to the committed log while open and omits plaintext IDs from diagnostic logs.
+- Refuse a second attachment to the same backend and keep the file writer lock across replacement.
+- Reject appends when the header, last committed record, or expected append offset has changed.
+- Reject records exceeding the configured content limit before allocating a body buffer.
+- Enforce the configured live index limits during writes and reopen.
+- Compaction and key rotation reject corrupt committed history before replacement. Reading a corrupted indexed record raises an error.
+
+### Known limitations
+
+- Detecting a valid old snapshot or a truncation at a record boundary across reopen requires a trusted checkpoint.
+- A complete corrupted record blocks normal opening, including when the record has been superseded.
+- The store format and AES-CTR + HMAC construction have not undergone an independent security audit.
+
 ## [0.9.0] — 2026-05-30
 
 ### Initial release

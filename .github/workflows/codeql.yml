@@ -1,61 +1,39 @@
-name: "CodeQL Advanced (dotNET 8)"
 
-on: workflow_dispatch
+name: "CodeQL (C#)"
+
+on:
+  workflow_dispatch:
 
 jobs:
   analyze:
-    name: Analyze (${{ matrix.language }})
-    runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
+    name: Analyze C#
+    runs-on: ubuntu-latest
+
     permissions:
+      contents: read
       security-events: write
       packages: read
-      actions: read
-      contents: read
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-        - language: csharp
-          build-mode: manual
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v6
 
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: | 
-          8
-          9
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
 
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
-      with:
-        languages: ${{ matrix.language }}
-        build-mode: ${{ matrix.build-mode }}
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: csharp
+          build-mode: none
+          queries: security-and-quality
 
-    
-    - name: Build (manual, net8.0)
-      if: matrix.build-mode == 'manual'
-      shell: bash
-      run: |
-        set -e
-        TARGET=$(git ls-files '*.sln' | head -n 1)
-        if [ -z "$TARGET" ]; then
-          TARGET=$(git ls-files '*.csproj' | head -n 1)
-        fi
-        if [ -z "$TARGET" ]; then
-          echo "No .sln o .csproj found in the repository"; exit 1
-        fi
-        echo "Building: $TARGET"        
-    
-        dotnet restore "$TARGET" -p:Configuration=Release -p:TargetFramework=net8.0    
-        dotnet build "$TARGET" -c Release -f net8.0 --no-restore
-    
-
-    - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
-      with:
-        category: "/language:${{matrix.language}}"
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:csharp"

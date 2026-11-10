@@ -1,4 +1,4 @@
-﻿using Hoddmir.BouncyCastle.Encryption.AEAD;
+using Hoddmir.BouncyCastle.Encryption.AEAD;
 using Hoddmir.Core.Encryption.AEAD;
 using Hoddmir.Core.Keys;
 using Hoddmir.Storage;
@@ -18,18 +18,21 @@ public sealed class VerifyAsyncTests
     private static readonly IArgon2idParamsProvider FastArgon =
         new FixedArgon2idParamsProvider(new Argon2idParams(32 * 1024, 1, 1));
 
-    // v0x04 header occupies sessionSaltLen(16) + EncryptedHeaderSize(512) = 528 bytes.
+    // v0x01 header occupies sessionSaltLen(16) + EncryptedHeaderSize(512) = 528 bytes.
     private const int HeaderSize = 16 + 512;
 
-    private static Task<EncryptedEntryStore> CreateStoreAsync(
-        MemoryAppendOnlyStoreProvider ms, IAEADProvider aead) =>
-        EncryptedEntryStore.Configure()
+    /// <summary>Creates or reopens a test vault with reduced KDF parameters.</summary>
+    private static Task<EncryptedEntryStore> CreateStoreAsync(MemoryAppendOnlyStoreProvider ms, IAEADProvider aead,
+                                                              bool createNew = true)
+    {
+        EncryptedEntryStore.StoreBuilder builder = EncryptedEntryStore.Configure()
             .WithPassword(Password)
             .WithSessionIterations(1)
             .WithSessionSaltLength(16)
             .WithDekArgon2id(FastArgon)
-            .WithAead(aead)
-            .OpenAsync(ms, ms);
+            .WithAead(aead);
+        return createNew ? builder.CreateAsync(ms, ms) : builder.OpenAsync(ms, ms);
+    }
 
     // ── Happy path ───────────────────────────────────────────────────────────
 
@@ -149,17 +152,45 @@ public sealed class VerifyAsyncTests
 
     // ── Corruption detection ─────────────────────────────────────────────────
     //
-    // In v0x04 the format is fully opaque — record boundaries are only known
-    // after decrypting the prefix. Rather than navigating the format from the
-    // outside (which would require either duplicating crypto logic in test code
-    // or exposing internals), we corrupt the file at known absolute positions:
-    //
-    //   - Middle of the record area: guaranteed to land inside some record's
-    //     ciphertext or tag, causing AEAD tag failure.
-    //   - Last N bytes: always the tail of the last record (PayloadTag or PaddedCt).
-    //
-    // These strategies test what matters: that VerifyAsync detects AEAD failures
-    // and reports them correctly, regardless of which specific record is hit.
+    // Record boundaries are captured from the backend after each write, so
+    // corruption can target a prefix or payload tag without duplicating the codec.
+
+    /// <summary>Reports header corruption and prevents it from being copied during a rewrite.</summary>
+    [TestMethod]
+    [DynamicData(nameof(Providers), DynamicDataSourceType.Method)]
+    public async Task ChangedHeader_IsReportedAndBlocksCompaction(IAEADProvider aead)
+    {
+        MemoryAppendOnlyStoreProvider backend = new();
+        await using EncryptedEntryStore store = await CreateStoreAsync(backend, aead);
+        await store.PutAsync("record", "value"u8.ToArray());
+        FlipByteAt(backend, HeaderSize - 1);
+
+        VerifyResult result = await store.VerifyAsync();
+
+        Assert.IsTrue(result.IsHeaderCorrupted);
+        Assert.IsFalse(result.IsHealthy);
+        Assert.AreEqual(1, result.ValidRecords);
+        Assert.AreEqual(0, result.CorruptedRecords);
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.PutAsync("new", "value"u8.ToArray()));
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.CompactAsync());
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.RotateDekAsync(Password));
+    }
+
+    /// <summary>Reports an incomplete header at offset zero.</summary>
+    [TestMethod]
+    [DynamicData(nameof(Providers), DynamicDataSourceType.Method)]
+    public async Task TruncatedHeader_IsReportedAtOffsetZero(IAEADProvider aead)
+    {
+        MemoryAppendOnlyStoreProvider backend = new();
+        await using EncryptedEntryStore store = await CreateStoreAsync(backend, aead);
+        TruncateStore(backend, bytesToRemove: 1);
+
+        VerifyResult result = await store.VerifyAsync();
+
+        Assert.IsFalse(result.IsHealthy);
+        CollectionAssert.AreEqual(new long[] { 0 }, result.TruncatedOffsets.ToArray());
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.CompactAsync());
+    }
 
     [TestMethod]
     [DynamicData(nameof(Providers), DynamicDataSourceType.Method)]
@@ -173,8 +204,7 @@ public sealed class VerifyAsyncTests
         await store.PutAsync("b", Encoding.UTF8.GetBytes("beta"));
         await store.PutAsync("c", Encoding.UTF8.GetBytes("gamma"));
 
-        // Flip a byte immediately after the header — always inside the first
-        // data record regardless of how many index records follow it.
+        // Corrupt the first record's key-derivation salt.
         FlipByteAt(ms, HeaderSize + 1);
 
         var result = await store.VerifyAsync();
@@ -195,17 +225,21 @@ public sealed class VerifyAsyncTests
 
         await store.PutAsync("victim", Encoding.UTF8.GetBytes("data"));
 
-        // The file layout is [header][data_record][index_record].
-        // VerifyAsync skips index records, so we must corrupt the data record area.
-        // The data record sits between HeaderSize and (fileLen - size_of_index_record).
-        // We flip a byte at HeaderSize+1 — always inside the first data record.
-        FlipByteAt(ms, HeaderSize + 1);
+        // The last byte belongs to the payload authentication tag.
+        long length = await ms.GetLengthAsync();
+        FlipByteAt(ms, length - 1);
 
         var result = await store.VerifyAsync();
 
         Assert.IsFalse(result.IsHealthy);
-        Assert.IsTrue(result.CorruptedRecords >= 1);
+        Assert.AreEqual(1, result.CorruptedRecords);
         Assert.AreEqual(0, result.TruncatedRecords);
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.PutAsync("new", "value"u8.ToArray()));
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.CompactAsync());
+        Assert.AreEqual(length, await ms.GetLengthAsync());
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.GetAsync("victim"));
+        await store.DisposeAsync();
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => CreateStoreAsync(ms, aead, createNew: false));
     }
 
     [TestMethod]
@@ -218,42 +252,56 @@ public sealed class VerifyAsyncTests
 
         await store.PutAsync("k", Encoding.UTF8.GetBytes("value"));
 
-        // Flip a byte immediately after the header — first byte of the first record's
-        // EncPrefix. This corrupts the prefix ciphertext, causing prefix decryption
-        // failure which VerifyAsync reports as corrupted.
-        FlipByteAt(ms, HeaderSize);
+        // The encrypted prefix follows the 32-byte record salt.
+        FlipByteAt(ms, HeaderSize + 32);
 
         var result = await store.VerifyAsync();
 
         Assert.IsFalse(result.IsHealthy);
-        Assert.IsTrue(result.CorruptedRecords >= 1 || result.TruncatedRecords >= 1,
-            "Corrupted EncPrefix must be detected as corrupted or truncated.");
+        Assert.AreEqual(1, result.CorruptedRecords);
+        Assert.AreEqual(0, result.TruncatedRecords);
     }
 
     [TestMethod]
     [DynamicData(nameof(Providers), DynamicDataSourceType.Method)]
-    public async Task MultipleCorruptedAreas_AllDetected(IAEADProvider aead)
+    public async Task BrokenChain_StopsAtFirstCorruptedRecord(IAEADProvider aead)
     {
         Trace.WriteLine($"Provider: {aead}");
         var ms = new MemoryAppendOnlyStoreProvider();
         await using var store = await CreateStoreAsync(ms, aead);
 
         await store.PutAsync("r0", Encoding.UTF8.GetBytes("zero"));
+        long firstEnd = await ms.GetLengthAsync();
         await store.PutAsync("r1", Encoding.UTF8.GetBytes("one"));
+        long secondEnd = await ms.GetLengthAsync();
         await store.PutAsync("r2", Encoding.UTF8.GetBytes("two"));
         await store.PutAsync("r3", Encoding.UTF8.GetBytes("three"));
 
-        // Flip bytes inside the first data record area (immediately after header).
-        // Each PutAsync writes [data_record][index_record], so data records start
-        // at HeaderSize. We flip two bytes within the first record's opaque blob.
-        FlipByteAt(ms, HeaderSize + 1);
-        FlipByteAt(ms, HeaderSize + 2);
+        FlipByteAt(ms, firstEnd - 1);
+        FlipByteAt(ms, secondEnd - 1);
 
         var result = await store.VerifyAsync();
 
         Assert.IsFalse(result.IsHealthy);
-        Assert.IsTrue(result.CorruptedRecords >= 1,
-            "At least one corrupted record must be detected.");
+        Assert.AreEqual(1, result.CorruptedRecords);
+        Assert.AreEqual(0, result.ValidRecords);
+    }
+
+    /// <summary>Detects removal of a complete committed record while the store is open.</summary>
+    [TestMethod]
+    [DynamicData(nameof(Providers), DynamicDataSourceType.Method)]
+    public async Task TruncationAtBoundary_ChangesCommittedLog(IAEADProvider aead)
+    {
+        MemoryAppendOnlyStoreProvider backend = new();
+        await using EncryptedEntryStore store = await CreateStoreAsync(backend, aead);
+        await store.PutAsync("record", "value"u8.ToArray());
+        long length = await backend.GetLengthAsync();
+        TruncateStore(backend, bytesToRemove: (int)(length - HeaderSize));
+
+        VerifyResult result = await store.VerifyAsync();
+        Assert.IsTrue(result.IsLogChanged);
+        Assert.IsFalse(result.IsHealthy);
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => store.CompactAsync());
     }
 
     // ── Truncation detection ─────────────────────────────────────────────────
@@ -290,16 +338,15 @@ public sealed class VerifyAsyncTests
 
         await store.PutAsync("only", Encoding.UTF8.GetBytes("data"));
 
-        // Truncate enough to cut into the EncPrefix of the first record
-        TruncateStore(ms, bytesToRemove: 5);
+        // Keep only the salt and two bytes of the encrypted prefix.
+        long length = await ms.GetLengthAsync();
+        TruncateStore(ms, bytesToRemove: checked((int)(length - HeaderSize - 34)));
 
         var result = await store.VerifyAsync();
 
-        // Truncating 5 bytes may land inside a tag (detected as corrupted) or
-        // inside a record body (detected as truncated) — both are valid signals.
         Assert.IsFalse(result.IsHealthy);
-        Assert.IsTrue(result.TruncatedRecords + result.CorruptedRecords >= 1,
-            "A truncated file must produce at least one truncated or corrupted record.");
+        Assert.AreEqual(1, result.TruncatedRecords);
+        Assert.AreEqual(0, result.CorruptedRecords);
     }
 
     // ── VerifyResult unit tests ───────────────────────────────────────────────
