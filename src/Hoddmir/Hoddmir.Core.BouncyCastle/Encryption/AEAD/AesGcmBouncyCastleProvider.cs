@@ -74,7 +74,7 @@ public sealed class AesGcmBouncyCastleProvider : IAEADProvider
         try
         {
             int outLen = gcm.ProcessBytes(inputBuf, 0, inputBuf.Length, ptTmp, 0);
-            outLen += gcm.DoFinal(ptTmp, outLen);
+            gcm.DoFinal(ptTmp, outLen);
             ptTmp.AsSpan(0, plaintext.Length).CopyTo(plaintext);
             return true;
         }

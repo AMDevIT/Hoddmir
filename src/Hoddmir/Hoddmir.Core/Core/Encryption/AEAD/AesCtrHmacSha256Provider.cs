@@ -58,6 +58,7 @@ public sealed class AesCtrHmacSha256Provider
 
     #region .ctor
 
+    /// <summary>Creates an AES-CTR and HMAC provider with an optional public HKDF salt.</summary>
     /// <param name="hkdfSalt">
     /// Optional HKDF salt (recommended ≥ 32 random bytes).
     /// Defaults to all-zeros, which is safe only when the IKM is already a
@@ -205,8 +206,14 @@ public sealed class AesCtrHmacSha256Provider
         CryptographicOperations.ZeroMemory(hash);
     }
 
-    // AES-256-CTR: keystream = ECB-encrypt(nonce[0..11] ‖ counter_BE[4]), XOR with input.
-    // Counter starts at 1. ECB on a single block is the standard way to build CTR manually.
+    /// <summary>Applies AES-256-CTR using AES only on nonce and counter blocks, never on plaintext.</summary>
+    /// <remarks>
+    /// NIST SP 800-38A section 6.5: encrypt nonce[0..11] || counter_BE[4], then XOR
+    /// with input. The counter starts at 1. An int-sized span cannot exhaust the
+    /// 32-bit counter. Callers must never reuse a nonce with the same key.
+    /// CodeQL cs/ecb-encryption (alert 21) flags the AES primitive configuration;
+    /// this is CTR with an external HMAC, not ECB message encryption.
+    /// </remarks>
     private static void AesCtrXor(ReadOnlySpan<byte> kenc,
                                   ReadOnlySpan<byte> nonce,
                                   ReadOnlySpan<byte> input,
@@ -232,20 +239,25 @@ public sealed class AesCtrHmacSha256Provider
         uint   counter      = 1;
         int    offset       = 0;
 
-        while (offset < input.Length)
+        try
         {
-            BinaryPrimitives.WriteUInt32BigEndian(counterBlock.AsSpan(12), counter);
-            enc.TransformBlock(counterBlock, 0, 16, keystreamBuf, 0);
+            while (offset < input.Length)
+            {
+                BinaryPrimitives.WriteUInt32BigEndian(counterBlock.AsSpan(12), counter);
+                enc.TransformBlock(counterBlock, 0, 16, keystreamBuf, 0);
 
-            int n = Math.Min(16, input.Length - offset);
-            for (int i = 0; i < n; i++)
-                output[offset + i] = (byte)(input[offset + i] ^ keystreamBuf[i]);
+                int n = Math.Min(16, input.Length - offset);
+                for (int i = 0; i < n; i++)
+                    output[offset + i] = (byte)(input[offset + i] ^ keystreamBuf[i]);
 
-            counter++;
-            offset += n;
+                counter++;
+                offset += n;
+            }
         }
-
-        CryptographicOperations.ZeroMemory(keystreamBuf);
+        finally
+        {
+            CryptographicOperations.ZeroMemory(keystreamBuf);
+        }
     }
 
     public override string ToString()

@@ -14,7 +14,7 @@ public sealed class FileVaultSecurityTests
 {
     #region Fields
 
-    private readonly string path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".hoddmir");
+    private readonly string path = Path.Join(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".hoddmir");
 
     #endregion
 
@@ -281,7 +281,9 @@ public sealed class FileVaultSecurityTests
     /// <summary>Attempts to acquire an independent file backend and releases it if successful.</summary>
     private async Task OpenAndCloseFileAsync()
     {
-        await using FileAppendOnlyStoreProvider backend = new(this.path);
+        await using (new FileAppendOnlyStoreProvider(this.path))
+        {
+        }
     }
 
     /// <summary>Injects one write fault and verifies that the same store cannot continue writing.</summary>

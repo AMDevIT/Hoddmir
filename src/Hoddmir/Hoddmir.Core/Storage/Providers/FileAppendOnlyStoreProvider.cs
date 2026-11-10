@@ -150,28 +150,32 @@ public sealed class FileAppendOnlyStoreProvider
         { 
             File.Delete(p); 
         } 
-        catch
+        catch (IOException)
         { 
-            /* best effort */ 
+            // Cleanup must not hide the original rewrite failure.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Cleanup must not hide the original rewrite failure.
         } 
     }
 
     public async ValueTask DisposeAsync()
     {
-        await semaphore.WaitAsync().ConfigureAwait(false);
+        await this.semaphore.WaitAsync().ConfigureAwait(false);
 
         try   
         { 
-            await fs.DisposeAsync().ConfigureAwait(false); 
+            // Keep the writer lock until the vault stream has been closed, even on failure.
+            await using (this.writerLock.ConfigureAwait(false))
+            {
+                await this.fs.DisposeAsync().ConfigureAwait(false);
+            }
         }
         finally 
         { 
-            try { await this.writerLock.DisposeAsync().ConfigureAwait(false); }
-            finally
-            {
-                semaphore.Release();
-                semaphore.Dispose();
-            }
+            this.semaphore.Release();
+            this.semaphore.Dispose();
         }
     }
 

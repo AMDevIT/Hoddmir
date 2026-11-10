@@ -15,7 +15,7 @@ namespace Hoddmir.Tests.ConsoleApp
 {
     internal class TestProvider
     {
-        #region Consts
+        #region Const
 
         /// <summary>
         /// Password used to create test-only stores. This is not a real password and should not 
@@ -29,7 +29,7 @@ namespace Hoddmir.Tests.ConsoleApp
 
         #region Fields
 
-        private static IArgon2idParamsProvider fastArgon = new FixedArgon2idParamsProvider(new Argon2idParams(32 * 1024, 2, 2));
+        private static readonly IArgon2idParamsProvider fastArgon = new FixedArgon2idParamsProvider(new Argon2idParams(32 * 1024, 2, 2));
 
         #endregion
 
@@ -43,7 +43,7 @@ namespace Hoddmir.Tests.ConsoleApp
             const string reopenedKey = "added-after-reopen";
             const string rotatedKey = "added-after-rotation";
             const string rotatedPassword = "rotated-test-password123.";
-            string path = Path.Combine(Path.GetTempPath(), $"hoddmir-lifecycle-{Guid.NewGuid():N}.dat");
+            string path = Path.Join(Path.GetTempPath(), $"hoddmir-lifecycle-{Guid.NewGuid():N}.dat");
             byte[] initialValue = "initial value"u8.ToArray();
             byte[] firstUpdate = "updated in the first session"u8.ToArray();
             byte[] secondUpdate = "updated after reopening"u8.ToArray();
@@ -93,10 +93,11 @@ namespace Hoddmir.Tests.ConsoleApp
                 {
                     try
                     {
-                        await using EncryptedEntryStore unexpectedStore = await CreateOrOpenStoreAsync(backend, reopenAead,
-                                                                                                       TestPassword, fastArgon,
-                                                                                                       cancellationToken);
-                        throw new InvalidDataException("The previous password still opens the rotated store.");
+                        await using (await CreateOrOpenStoreAsync(backend, reopenAead, TestPassword, fastArgon,
+                                                                 cancellationToken))
+                        {
+                            throw new InvalidDataException("The previous password still opens the rotated store.");
+                        }
                     }
                     catch (CryptographicException)
                     {
@@ -138,14 +139,9 @@ namespace Hoddmir.Tests.ConsoleApp
             if (File.Exists(TestFilePath))
                 File.Delete(TestFilePath);
 
-            IArgon2idParamsProvider argon2Provider;
+            IArgon2idParamsProvider argon2Provider = useFastArgon ? fastArgon : new CalibratingArgon2idParamsProvider();
             ChaCha20Poly1305Provider aead = new();
             await using FileAppendOnlyStoreProvider provider = new(TestFilePath, FileMode.CreateNew);
-
-            if (useFastArgon)
-                argon2Provider = fastArgon;
-            else
-                argon2Provider = new CalibratingArgon2idParamsProvider();
 
             await using EncryptedEntryStore store = await CreateOrOpenStoreAsync(provider,
                                                                                  aead,
@@ -168,14 +164,9 @@ namespace Hoddmir.Tests.ConsoleApp
             if (File.Exists(RandomTestFilePath))
                 File.Delete(RandomTestFilePath);
 
-            IArgon2idParamsProvider argon2Provider;
+            IArgon2idParamsProvider argon2Provider = useFastArgon ? fastArgon : new CalibratingArgon2idParamsProvider();
             ChaCha20Poly1305Provider aead = new();
             await using  FileAppendOnlyStoreProvider provider = new(RandomTestFilePath, FileMode.CreateNew);
-
-            if (useFastArgon)
-                argon2Provider = fastArgon;
-            else
-                argon2Provider = new CalibratingArgon2idParamsProvider();
 
             await using EncryptedEntryStore store = await CreateOrOpenStoreAsync(provider,
                                                                                  aead,

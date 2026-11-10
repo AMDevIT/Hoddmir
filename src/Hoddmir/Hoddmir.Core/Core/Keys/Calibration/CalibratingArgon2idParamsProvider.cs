@@ -9,7 +9,7 @@ namespace Hoddmir.Keys;
 /// wall-clock duration on the current machine.
 /// <para>
 /// Calibration runs once and is cached. The result is reused for all subsequent calls.
-/// Call <see cref="InvalidateCacheAsync"/> to force a new calibration (e.g. after the
+    /// Call <see cref="InvalidateCache"/> to force a new calibration (e.g. after the
 /// app returns from background on mobile).
 /// </para>
 /// <para>Thread-safe: concurrent callers all await the same single calibration task.</para>
@@ -27,6 +27,7 @@ public sealed class CalibratingArgon2idParamsProvider : IArgon2idParamsProvider
             ? _lazy.Value.Result
             : null;
 
+    /// <summary>Creates a provider that calibrates Argon2id to the requested time and memory budget.</summary>
     /// <param name="target">Desired wall-clock time per KDF invocation (default 500 ms).</param>
     /// <param name="maxMemMiB">Upper memory bound in MiB (default 512).</param>
     public CalibratingArgon2idParamsProvider(TimeSpan? target = null, int maxMemMiB = 512)

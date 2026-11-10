@@ -44,48 +44,42 @@ public class KnownAnswerTests
     public void ChaCha20Poly1305_RFC8439_Section282_Encrypt()
     {
         // Source: https://www.rfc-editor.org/rfc/rfc8439#section-2.8.2
-        var key = H("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f");
-        var nonce = H("070000004041424344454647");
-        var aad = H("50515253c0c1c2c3c4c5c6c7");
-        var pt  = H("4c616469657320616e642047656e746c656d656e206f662074686520636c6173"
-                  + "73206f6620273939"
-                  + "3a20496620492063"
-                  + "6f756c64206f6666"
-                  + "657220796f75206f"
-                  + "6e6c79206f6e6520"
-                  + "74697020666f7220"
-                  + "746865206675747572652c2073756e73637265656e20776f756c642062652069742e");
+        byte[] key = H("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f");
+        byte[] nonce = H("070000004041424344454647");
+        byte[] aad = H("50515253c0c1c2c3c4c5c6c7");
+        byte[] pt = H("4c616469657320616e642047656e746c656d656e206f662074686520636c6173"
+                      + "73206f6620273939"
+                      + "3a20496620492063"
+                      + "6f756c64206f6666"
+                      + "657220796f75206f"
+                      + "6e6c79206f6e6520"
+                      + "74697020666f7220"
+                      + "746865206675747572652c2073756e73637265656e20776f756c642062652069742e");
 
         // Expected outputs from RFC 8439 §2.8.2
-        var expectedCt  = H("d31a8d34648e60db7b86afbc53ef7ec2"
-                           + "a4aded51296e08fea9e2b5a736ee62d6"
-                           + "3dbea45e8ca9671282fafb69da92728b"
-                           + "1a71de0a9e060b2905d6a5b67ecd3b36"
-                           + "92ddbd7f2d778b8c98403668955713"  // 63 bytes
-                           + "00");                             // padding to 64 — RFC uses 114-byte pt
-        var expectedTag = H("1ae10b594f09e26a7e902ecbd0600691");
-
-        // Recalculate correct expected values from RFC (plaintext is 114 bytes)
-        // The plaintext above exactly matches RFC §2.8.2 (padded to hex).
-        // We use the provider's own interface and verify encrypt → decrypt.
-        var provider = new ChaCha20Poly1305Provider();
-        var ct  = new byte[pt.Length];
-        var tag = new byte[provider.TagSizeBytes];
+        byte[] expectedCt = H("d31a8d34648e60db7b86afbc53ef7ec2"
+                             + "a4aded51296e08fea9e2b5a736ee62d6"
+                             + "3dbea45e8ca9671282fafb69da92728b"
+                             + "1a71de0a9e060b2905d6a5b67ecd3b36"
+                             + "92ddbd7f2d778b8c9803aee328091b58"
+                             + "fab324e4fad675945585808b4831d7bc"
+                             + "3ff4def08e4b7a9de576d26586cec64b"
+                             + "6116");
+        byte[] expectedTag = H("1ae10b594f09e26a7e902ecbd0600691");
+        ChaCha20Poly1305Provider provider = new();
+        byte[] ct = new byte[pt.Length];
+        byte[] tag = new byte[provider.TagSizeBytes];
+        byte[] recovered = new byte[pt.Length];
 
         provider.Encrypt(key, nonce, aad, pt, ct, tag);
+        CollectionAssert.AreEqual(expectedCt, ct, "RFC 8439 §2.8.2 ciphertext differs.");
+        CollectionAssert.AreEqual(expectedTag, tag, "RFC 8439 §2.8.2 tag differs.");
 
-        // Verify by decryption: the authoritative check is that decrypt returns true
-        // and recovers the original plaintext, using the RFC-specified inputs.
-        var recovered = new byte[pt.Length];
         bool ok = provider.Decrypt(key, nonce, aad, ct, tag, recovered);
 
         Assert.IsTrue(ok, "ChaCha20-Poly1305 decrypt of RFC 8439 §2.8.2 vector failed.");
         CollectionAssert.AreEqual(pt, recovered,
-            "ChaCha20-Poly1305: decrypted plaintext does not match RFC §2.8.2 original.");
-
-        // Additionally verify the tag matches the RFC-published value exactly.
-        // (The ciphertext is implicitly verified by the successful decrypt above.)
-        AssertHex("RFC 8439 §2.8.2 tag", "1ae10b594f09e26a7e902ecbd0600691", tag);
+                                  "ChaCha20-Poly1305: decrypted plaintext does not match RFC §2.8.2 original.");
     }
 
     /// <summary>

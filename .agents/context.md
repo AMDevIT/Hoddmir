@@ -1,3 +1,19 @@
+## Unused variable cleanup
+
+- Objective and status. Reviewed all C# sources for unread local declarations; replaced two resource-only local names with await-using expressions.
+- Decisions. Preserve resource acquisition, exception propagation, disposal and public AlgorithmId members. Keep the four unused-assignment fixes from the preceding code-scanning remediation.
+- Affected files. TestProvider.cs and FileVaultSecurityTests.cs. See [unused variable cleanup](unused-variable-cleanup.md).
+- Checks. Roslyn syntax inspection and manual source review; Git whitespace checks passed. Restore, build, tests and CodeQL were not run at the user's request.
+- Open issues and recommended next step. Confirm compiler and analyzer warnings when the user runs validation.
+
+## Code scanning remediation
+
+- Objective and status. Reviewed 17 open CodeQL alerts and applied targeted fixes. Alert 21 is documented as a contextual false positive in the manual CTR construction.
+- Decisions. Preserve AES-CTR, HMAC, vault compatibility and writer-lock lifetime. Add independent CTR comparison cases and correct the RFC ChaCha20 ciphertext assertions. No remote alerts were dismissed.
+- Affected files. Crypto providers, calibration constructor documentation, file backend disposal and cleanup, console helper and tests. See [code scanning remediation](code-scanning-remediation.md).
+- Checks. Source and diff review; Git whitespace checks passed. Restore, build, tests and CodeQL execution were skipped at the user's explicit request.
+- Open issues and recommended next step. The user will run validation on .NET 9 and .NET 10, then rerun CodeQL. Alert 21 requires false-positive review; confirm the resource-disposal heuristic in alert 25 after scanning.
+
 ## Hoddmir feature analysis
 
 - Objective and status. Completed the initial review and static analysis.

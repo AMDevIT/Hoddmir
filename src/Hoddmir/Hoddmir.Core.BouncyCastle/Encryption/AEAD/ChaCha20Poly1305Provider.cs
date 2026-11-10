@@ -105,7 +105,7 @@ public sealed class ChaCha20Poly1305Provider(ILogger? logger = null)
         {
             int outLen = aead.ProcessBytes(ciphertext.ToArray(), 0, ciphertext.Length, ptTmp, 0);
             outLen += aead.ProcessBytes(tag.ToArray(), 0, tag.Length, ptTmp, outLen);
-            outLen += aead.DoFinal(ptTmp, outLen);
+            aead.DoFinal(ptTmp, outLen);
 
             ptTmp.AsSpan(0, plaintext.Length).CopyTo(plaintext);
             return true;

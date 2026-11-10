@@ -416,7 +416,7 @@ public sealed class EncryptedStoreTests
     [TestMethod]
     public async Task FileStore_ReadThenConcurrentPuts_SurviveReopen()
     {
-        string path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".hoddmir");
+        string path = Path.Join(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".hoddmir");
         try
         {
             await using (FileAppendOnlyStoreProvider backend = new(path, FileMode.CreateNew))
@@ -453,7 +453,7 @@ public sealed class EncryptedStoreTests
     [TestMethod]
     public async Task FileStore_IncompleteTail_CanBeRecoveredByCompaction()
     {
-        string path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".hoddmir");
+        string path = Path.Join(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".hoddmir");
         byte[] checkpoint;
         try
         {
@@ -579,7 +579,7 @@ public sealed class EncryptedStoreTests
     [TestMethod]
     public void FileBackend_OpenDoesNotCreateMissingVault()
     {
-        string path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".hoddmir");
+        string path = Path.Join(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".hoddmir");
         try
         {
             Assert.ThrowsExactly<FileNotFoundException>(() => new FileAppendOnlyStoreProvider(path));
