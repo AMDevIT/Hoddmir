@@ -1,0 +1,76 @@
+
+name: "CodeQL Advanced (C#)"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    name: Analyze all C# projects
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+
+    env:
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup .NET SDKs
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+            10.0.x
+
+      - name: Show .NET environment
+        run: dotnet --info
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: csharp
+          build-mode: manual
+          queries: security-and-quality
+
+      - name: Build all C# projects
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -d '' PROJECTS < <(
+            find . -type f -name '*.csproj' \
+              -not -path '*/bin/*' \
+              -not -path '*/obj/*' \
+              -print0 | sort -z
+          )
+
+          if (( ${#PROJECTS[@]} == 0 )); then
+            echo "::error::No C# projects found"
+            exit 1
+          fi
+
+          echo "Found ${#PROJECTS[@]} projects"
+
+          for PROJECT in "${PROJECTS[@]}"; do
+            echo "::group::Building $PROJECT"
+
+            dotnet build "$PROJECT" \
+              --configuration Release \
+              --no-incremental \
+              -p:UseSharedCompilation=false
+
+            echo "::endgroup::"
+          done
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:csharp"
