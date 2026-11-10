@@ -164,18 +164,20 @@ public sealed class FileAppendOnlyStoreProvider
     {
         await this.semaphore.WaitAsync().ConfigureAwait(false);
 
-        try   
-        { 
-            // Keep the writer lock until the vault stream has been closed, even on failure.
-            await using (this.writerLock.ConfigureAwait(false))
+        using (this.semaphore)
+        {
+            try
             {
-                await this.fs.DisposeAsync().ConfigureAwait(false);
+                // Keep the writer lock until the vault stream has been closed, even on failure.
+                await using (this.writerLock.ConfigureAwait(false))
+                {
+                    await this.fs.DisposeAsync().ConfigureAwait(false);
+                }
             }
-        }
-        finally 
-        { 
-            this.semaphore.Release();
-            this.semaphore.Dispose();
+            finally
+            {
+                this.semaphore.Release();
+            }
         }
     }
 

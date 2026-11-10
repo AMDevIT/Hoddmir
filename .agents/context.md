@@ -1,3 +1,11 @@
+## Code scanning semaphore disposal
+
+- Objective and status. Fixed the remaining alert 25 instance on revision 3b7cf17, which flags manual semaphore disposal.
+- Decisions. Use a using scope for the acquired semaphore and retain Release in finally, preserving stream, writer-lock and semaphore disposal order.
+- Affected files. FileAppendOnlyStoreProvider.cs. See [semaphore disposal follow-up](code-scanning-semaphore-disposal.md).
+- Checks. Read the current GitHub alert and reviewed the diff; Git whitespace checks passed. No restore, build, tests or CodeQL execution at the user's request.
+- Open issues and recommended next step. Publish the change and rerun CodeQL to confirm resolution.
+
 ## Unused variable cleanup
 
 - Objective and status. Reviewed all C# sources for unread local declarations; replaced two resource-only local names with await-using expressions.
